@@ -1,0 +1,36 @@
+# Build outputs
+relay-gateway.exe
+*.exe
+relay-gateway
+*.out
+*.test
+
+# Runtime configuration and local data
+config.yaml
+cookies.txt
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.async-task-recovery.jsonl
+*.png
+/media/profile/
+
+# Test and local caches
+coverage.out
+coverage.html
+*.tmp
+.cache/
+.gocache/
+.gocache-*/
+.gocache-local/
+.codex-tmp/
+.edge-test-profile/
+
+# Local editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

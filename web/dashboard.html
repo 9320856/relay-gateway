@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="google" content="notranslate">
+  <meta name="description" content="Relay Gateway 管理控制台">
+  <title>控制台 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
+  <script defer src="/assets/app.js?v=linear-v5"></script>
+</head>
+<body data-page="dashboard" translate="no" class="notranslate">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
+      <a class="brand" href="/dashboard">
+        <span class="brand-mark">RG</span>
+        <span class="brand-name">Relay Gateway</span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="nav-link active" href="/dashboard" id="nav-dashboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+          <span>控制台</span>
+        </a>
+        <a class="nav-link" href="/profiles" id="nav-profiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span>Profile 管理</span>
+        </a>
+        <a class="nav-link" href="/media" id="nav-media">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+          <span>媒体管理</span>
+        </a>
+        <a class="nav-link" href="/logs" id="nav-logs">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
+          <span>调用日志</span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <span>V0.1 · 开发测试版</span>
+      </div>
+    </aside>
+
+    <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="mobile-nav-toggle icon-button" id="mobile-nav-toggle" type="button" aria-label="切换侧边栏导航">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <div class="topbar-title-wrap">
+            <h1>网关控制台</h1>
+            <p class="topbar-sub">路由、模型与运行状态</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="topbar-status-badge" id="topbar-status">
+            <span class="status-dot"></span>
+            <span>服务正常</span>
+          </div>
+          <div class="user-menu">
+            <button class="account-button" id="user-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu-popover">
+              <span class="account-avatar" aria-hidden="true">U</span>
+              <span id="current-user">—</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="menu-popover hidden" id="user-menu-popover" role="menu">
+              <button type="button" role="menuitem" data-settings-tab="account">账号设置</button>
+              <button type="button" role="menuitem" data-settings-tab="runtime">系统设置</button>
+              <button type="button" role="menuitem" data-settings-tab="gateway-key">网关 Key</button>
+              <hr>
+              <button type="button" role="menuitem" id="logout-button">退出登录</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- 统一运行概览数据带 (高 104px) -->
+      <section class="stats overview-strip" aria-label="运行概览">
+        <article class="stat overview-cell">
+          <span class="stat-label">总渠道</span>
+          <strong class="stat-value" id="stat-channels">0</strong>
+          <small class="stat-meta">已配置路由上游</small>
+        </article>
+        <article class="stat overview-cell">
+          <span class="stat-label">健康渠道</span>
+          <div class="stat-value-wrap">
+            <strong class="stat-value" id="stat-healthy">0</strong>
+            <div class="stat-progress-track" title="健康渠道比例">
+              <div class="stat-progress-bar" id="stat-healthy-bar" style="width: 0%;"></div>
+            </div>
+          </div>
+          <small class="stat-meta">连通测试正常</small>
+        </article>
+        <article class="stat overview-cell">
+          <span class="stat-label">已发现模型</span>
+          <strong class="stat-value" id="stat-models">0</strong>
+          <small class="stat-meta">同步聚合模型总数</small>
+        </article>
+        <article class="stat overview-cell">
+          <span class="stat-label">网关 Key</span>
+          <div class="stat-token-badge" id="stat-token-container">
+            <span class="status-dot"></span>
+            <strong class="stat-token-text" id="stat-token">未配置</strong>
+          </div>
+          <small class="stat-meta">外部 /v1 鉴权调用</small>
+        </article>
+      </section>
+
+      <!-- 渠道管理矩阵 (全宽) -->
+      <section class="panel" id="channels-section">
+        <div class="panel-head">
+          <div>
+            <h2>渠道管理</h2>
+          </div>
+          <button class="button primary add-channel-btn" id="add-channel" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            <span>添加渠道</span>
+          </button>
+        </div>
+        <div class="table-wrap" id="channels-table-wrap">
+          <table class="channels-table">
+            <thead>
+              <tr>
+                <th style="width: 28%;">渠道</th>
+                <th style="width: 12%;">类型</th>
+                <th style="width: 10%;">优先级</th>
+                <th style="width: 14%;">状态</th>
+                <th style="width: 10%;">模型</th>
+                <th style="width: 26%;" class="align-right">操作</th>
+              </tr>
+            </thead>
+            <tbody id="channel-list"></tbody>
+          </table>
+        </div>
+        <div class="empty empty-channels hidden" id="channels-empty">
+          <div class="empty-icon-box">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>
+          </div>
+          <p class="empty-title">尚未配置渠道</p>
+          <p class="empty-desc">添加第一个渠道后即可开始转发与调度大模型请求。</p>
+          <button class="button primary empty-action-btn" id="empty-add-channel" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            <span>添加第一个渠道</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 快速测试工作台 (42% / 58% 比例) -->
+      <section class="panel playground-panel">
+        <div class="panel-head playground-head">
+          <div>
+            <h2>快速测试工作台</h2>
+          </div>
+          <div class="tabs" role="tablist" aria-label="测试类型">
+            <button class="tab active" type="button" role="tab" aria-selected="true" data-playground-kind="chat">对话 (Chat)</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="image">生图 (Image)</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="video">视频 (Video)</button>
+          </div>
+        </div>
+
+        <div class="playground-studio">
+          <form id="playground-form" class="playground-form">
+            <input type="hidden" name="kind" value="chat">
+            <div class="form-grid">
+              <label>指定分发渠道
+                <select name="channel_id">
+                  <option value="">自动路由（权重分发）</option>
+                </select>
+              </label>
+              <label>模型
+                <select id="playground-model-select"></select>
+                <input name="model" id="playground-model-input" required placeholder="选择或输入模型" class="hidden">
+              </label>
+            </div>
+
+            <label class="full">提示词 (Prompt)
+              <textarea name="prompt" rows="5" required placeholder="输入对话测试内容"></textarea>
+            </label>
+
+            <fieldset class="playground-options hidden" data-playground-options="image">
+              <legend>图片参数</legend>
+              <label>张数<input name="image_n" type="number" min="1" max="4" value="1"></label>
+              <label>尺寸
+                <select id="playground-image-size-select">
+                  <option value="1024x1024" selected>1024x1024 (1:1 正方)</option>
+                  <option value="1024x1792">1024x1792 (9:16 竖屏)</option>
+                  <option value="1792x1024">1792x1024 (16:9 宽屏)</option>
+                  <option value="768x1344">768x1344 (3:4 人像)</option>
+                  <option value="1344x768">1344x768 (4:3 风景)</option>
+                  <option value="512x512">512x512 (1:1 标清)</option>
+                  <option value="__custom__">➕ 自定义尺寸...</option>
+                </select>
+                <input name="image_size" id="playground-image-size-input" value="1024x1024" placeholder="输入自定义尺寸，例如 1152x896" class="hidden" style="margin-top:6px;">
+              </label>
+              <label>质量
+                <select name="image_quality">
+                  <option value="auto">auto</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+              <label>输出格式
+                <select name="image_output_format">
+                  <option value="png">PNG</option>
+                  <option value="jpeg">JPEG</option>
+                  <option value="webp">WebP</option>
+                </select>
+              </label>
+              <label class="full">参考图 URL（每行一个）
+                <textarea name="image_reference_urls" rows="2" placeholder="https://example.com/reference.png"></textarea>
+              </label>
+            </fieldset>
+
+            <fieldset class="playground-options hidden" data-playground-options="video">
+              <legend>视频参数</legend>
+              <label>时长（秒）<input name="video_duration" type="number" min="1" max="15" value="6"></label>
+              <label>画面比例
+                <select name="video_aspect_ratio">
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                  <option value="1:1">1:1</option>
+                </select>
+              </label>
+              <label>分辨率
+                <select name="video_resolution">
+                  <option value="480p">480p</option>
+                  <option value="720p" selected>720p</option>
+                  <option value="1080p">1080p</option>
+                </select>
+              </label>
+              <label>首帧参考图 URL
+                <input name="video_reference_image" type="url" placeholder="https://example.com/first-frame.png">
+              </label>
+            </fieldset>
+
+            <div class="form-actions">
+              <button class="button primary block submit-test-btn" type="submit">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                <span>发送测试请求</span>
+              </button>
+            </div>
+          </form>
+
+          <div class="playground-canvas" id="playground-canvas">
+            <div class="canvas-status-line" id="canvas-status-line"></div>
+            <div class="canvas-header">
+              <div class="canvas-header-left">
+                <span class="canvas-title">响应输出</span>
+                <div class="canvas-toggle-group" role="tablist" aria-label="输出显示模式">
+                  <button class="toggle-btn active" id="canvas-toggle-preview" type="button" role="tab" aria-selected="true">预览</button>
+                  <button class="toggle-btn" id="canvas-toggle-json" type="button" role="tab" aria-selected="false">JSON</button>
+                </div>
+              </div>
+              <div class="canvas-header-right">
+                <p class="run-status" id="playground-status" aria-live="polite">等待请求</p>
+              </div>
+            </div>
+
+            <div class="canvas-body" id="canvas-body">
+              <div class="playground-placeholder" id="playground-placeholder">
+                <div class="placeholder-icon">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                </div>
+                <p class="placeholder-title">等待测试请求</p>
+                <p class="placeholder-desc">在左侧配置参数并发送请求后，此处将展示解析后的渲染结果或原始报文。</p>
+              </div>
+
+              <div class="playground-preview-pane" id="playground-preview-pane">
+                <div class="chat-preview hidden" id="playground-chat"></div>
+                <div class="media-results hidden" id="playground-media"></div>
+              </div>
+
+              <div class="playground-json-pane hidden" id="playground-json-pane">
+                <pre class="result" id="playground-result">等待请求</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 渠道配置模态框 -->
+  <dialog id="channel-dialog">
+    <form id="channel-form" class="dialog-card">
+      <div class="panel-head">
+        <div>
+          <h2 id="channel-dialog-title">添加渠道</h2>
+        </div>
+        <button class="icon-button" type="button" id="cancel-channel" aria-label="关闭">×</button>
+      </div>
+
+      <div class="form-grid">
+        <label class="full hidden" id="channel-id-row">渠道 ID<input name="id" readonly maxlength="64"></label>
+        <label>显示名称<input name="name" required maxlength="128" placeholder="OpenAI 主线路"></label>
+        <label id="channel-protocol-field">协议与运行档案
+          <select id="channel-protocol-picker" required></select>
+        </label>
+        <div class="hidden">
+          <select name="type" required></select>
+          <select name="profile_id"><option value="">不绑定自定义 Profile（使用内置协议默认）</option></select>
+        </div>
+        <label class="full">Base URL<input name="base_url" required placeholder="https://api.openai.com/v1"></label>
+        <label class="full">上游 Key（每行一个）<textarea name="api_keys_raw" rows="4" spellcheck="false" placeholder="sk-..."></textarea></label>
+
+        <section class="full model-editor" aria-labelledby="model-editor-title">
+          <div class="model-editor-head">
+            <div>
+              <strong id="model-editor-title">上游模型</strong>
+              <small>保存后会自动同步，也可以现在测试凭据并获取模型。</small>
+            </div>
+            <button class="button" id="fetch-channel-models" type="button">获取模型</button>
+          </div>
+          <p class="model-fetch-status" id="model-fetch-status" aria-live="polite">尚未获取</p>
+          <div class="model-catalog" id="model-catalog"></div>
+          <datalist id="channel-model-options"></datalist>
+        </section>
+
+        <label class="full">手动模型（每行一个，支持 *）<textarea name="models_raw" rows="3" spellcheck="false" placeholder="无法自动获取时可在此补充"></textarea></label>
+
+        <section class="full mapping-editor" aria-labelledby="mapping-editor-title">
+          <div class="model-editor-head">
+            <div>
+              <strong id="mapping-editor-title">模型映射</strong>
+              <small>对外模型名 → 上游模型；映射会作为别名补充。</small>
+            </div>
+            <button class="button" id="add-model-mapping" type="button">添加映射</button>
+          </div>
+          <input type="hidden" name="model_map_raw">
+          <div class="mapping-head" aria-hidden="true"><span>对外模型名</span><span>上游模型</span><span></span></div>
+          <div class="mapping-list" id="mapping-list"></div>
+          <p class="empty-inline" id="mapping-empty">尚未添加映射。</p>
+        </section>
+
+        <label class="full">附加请求头（JSON 对象）<textarea name="headers_raw" rows="3" spellcheck="false" placeholder='{"X-Custom-Header":"value"}'></textarea></label>
+        <label>优先级<input name="priority" type="number" min="1" value="1"></label>
+        <label>权重<input name="weight" type="number" min="1" max="100" value="1"></label>
+        <label class="check full"><input name="enabled" type="checkbox" checked>启用渠道</label>
+        <label class="check full"><input name="fetch_models" type="checkbox" checked>自动同步模型</label>
+      </div>
+
+      <div class="form-actions" style="margin-top:20px;">
+        <button class="button ghost" type="button" id="cancel-channel-bottom">取消</button>
+        <button class="button primary" type="submit">保存渠道</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 账号与系统设置模态框 -->
+  <dialog id="settings-dialog">
+    <div class="dialog-card settings-card">
+      <div class="panel-head">
+        <div>
+          <h2>账号与设置</h2>
+        </div>
+        <button class="icon-button" type="button" id="close-settings" aria-label="关闭">×</button>
+      </div>
+      <div class="settings-layout">
+        <div class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button class="settings-tab active" type="button" role="tab" data-settings-tab="account" aria-selected="true">账号设置</button>
+          <button class="settings-tab" type="button" role="tab" data-settings-tab="runtime" aria-selected="false">系统设置</button>
+          <button class="settings-tab" type="button" role="tab" data-settings-tab="gateway-key" aria-selected="false">网关 Key</button>
+        </div>
+        <section class="settings-panel" data-settings-panel="account">
+          <form id="account-form" class="form-stack">
+            <label>新用户名<input name="new_username" minlength="3" maxlength="64" placeholder="输入新用户名"></label>
+            <label>当前密码<input name="current_password" type="password" required autocomplete="current-password" placeholder="输入当前密码以确认身份"></label>
+            <label>新密码<input name="new_password" type="password" minlength="12" maxlength="128" autocomplete="new-password" placeholder="留空则只修改用户名"></label>
+            <button class="button primary" type="submit">更新账号</button>
+          </form>
+        </section>
+        <section class="settings-panel hidden" data-settings-panel="runtime">
+          <form id="settings-form" class="form-grid compact">
+            <label>监听端口<input name="port" type="number" min="1" max="65535"></label>
+            <label>日志保留天数<input name="audit_retention_days" type="number" min="1" max="365"></label>
+            <button class="button primary full" type="submit">保存运行设置</button>
+          </form>
+        </section>
+        <section class="settings-panel hidden" data-settings-panel="gateway-key">
+          <div class="token-row">
+            <div>
+              <span>当前网关 Key</span>
+              <code id="token-prefix">—</code>
+              <small id="token-updated-at">—</small>
+            </div>
+            <button class="button danger" id="rotate-token" type="button">重置 Key</button>
+          </div>
+          <p class="muted">完整 Key 只在重置后显示一次。旧 Key 会立即失效。</p>
+          <div class="secret-output hidden" id="token-output">
+            <p>请立即复制；关闭设置后无法再次查看。</p>
+            <code id="new-token"></code>
+            <button class="button primary" id="copy-token" type="button">复制 Key</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+</body>
+</html>

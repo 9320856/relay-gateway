@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="google" content="notranslate">
+  <meta name="description" content="Relay Gateway 托管媒体资产">
+  <title>媒体资产 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
+  <script defer src="/assets/app.js?v=linear-v5"></script>
+</head>
+<body data-page="media" translate="no" class="notranslate">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
+      <a class="brand" href="/dashboard">
+        <span class="brand-mark">RG</span>
+        <span><strong>Relay Gateway</strong><small>V0.1 · 开发测试版</small></span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="nav-link" href="/dashboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+          <span>控制台</span>
+        </a>
+        <a class="nav-link" href="/profiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span>Profile 管理</span>
+        </a>
+        <a class="nav-link active" href="/media">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+          <span>媒体管理</span>
+        </a>
+        <a class="nav-link" href="/logs">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
+          <span>调用日志</span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <span>本地媒体存储</span>
+      </div>
+    </aside>
+
+    <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="mobile-nav-toggle icon-button" id="mobile-nav-toggle" type="button" aria-label="切换侧边栏导航">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <div>
+            <p class="eyebrow"><span class="status-dot"></span>MEDIA REPOSITORY</p>
+            <h1>媒体资产管理</h1>
+          </div>
+        </div>
+        <div class="account">
+          <div class="account-pill" title="当前登录用户">
+            <span class="account-avatar" aria-hidden="true">U</span>
+            <span id="current-user">—</span>
+          </div>
+          <button class="button button-ghost-bordered" id="logout-button" type="button" title="退出登录">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            <span>退出</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">ASSETS</p>
+            <h2>托管文件库</h2>
+            <p class="muted">图片和视频可在此实时预览、获取公网直链；删除会同步清理本地物理文件和审计记录。</p>
+          </div>
+          <div class="form-actions media-toolbar">
+            <label>类型
+              <select id="media-kind-filter">
+                <option value="">全部类型</option>
+                <option value="image">图片 (Image)</option>
+                <option value="video">视频 (Video)</option>
+                <option value="audio">音频 (Audio)</option>
+              </select>
+            </label>
+            <label>状态
+              <select id="media-status-filter">
+                <option value="">全部状态</option>
+                <option value="available">可用 (Available)</option>
+                <option value="pending">排队中 (Pending)</option>
+                <option value="materializing">固化中 (Materializing)</option>
+                <option value="failed">失败 (Failed)</option>
+              </select>
+            </label>
+            <div class="view-switch-group tabs">
+              <button class="button compact-btn tab active" id="media-view-grid" type="button" title="画廊视图">⊞ 画廊</button>
+              <button class="button compact-btn tab" id="media-view-table" type="button" title="表格视图">☰ 表格</button>
+            </div>
+            <button class="button primary compact-btn" id="media-refresh" type="button">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+              <span>刷新</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="media-grid" class="media-gallery-grid"></div>
+
+        <div class="table-wrap hidden" id="media-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:72px;">预览</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>大小</th>
+                <th>来源任务</th>
+                <th>创建时间</th>
+                <th class="align-right">操作</th>
+              </tr>
+            </thead>
+            <tbody id="media-list"></tbody>
+          </table>
+        </div>
+
+        <div class="empty hidden" id="media-empty">暂无媒体资产。</div>
+
+        <div class="media-pagination">
+          <button class="button ghost" id="media-prev" type="button">上一页</button>
+          <span id="media-page-label">第 1 页</span>
+          <button class="button ghost" id="media-next" type="button">下一页</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 媒体预览模态框（包含必要选择器契约） -->
+  <dialog id="media-preview-dialog" class="media-preview-dialog" aria-labelledby="media-preview-title">
+    <div class="dialog-card media-preview-card">
+      <div class="media-preview-head">
+        <div class="media-preview-title-wrap">
+          <h2 id="media-preview-title">媒体预览</h2>
+          <span id="media-preview-meta" class="muted font-mono" style="font-size:0.75rem;"></span>
+        </div>
+        <button class="button ghost compact-btn" id="media-preview-close" type="button">关闭 ✕</button>
+      </div>
+
+      <div id="media-preview-content" class="media-preview-content"></div>
+
+      <div class="media-preview-footer" id="media-preview-footer">
+        <div class="media-preview-link-box">
+          <span class="muted font-mono" style="font-size:0.75rem;">直链:</span>
+          <input type="text" id="media-preview-url" readonly class="media-preview-url-input">
+          <button class="button ghost compact-btn" id="media-preview-copy-btn" type="button">复制公开链接</button>
+        </div>
+        <div class="media-preview-actions">
+          <a class="button ghost compact-btn" id="media-preview-open-ext" target="_blank" rel="noopener noreferrer">在新标签打开 ↗</a>
+          <a class="button primary compact-btn" id="media-preview-download-btn" download>下载 💾</a>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+</body>
+</html>

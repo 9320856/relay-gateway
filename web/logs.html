@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="google" content="notranslate">
+  <meta name="description" content="Relay Gateway 调用日志与链路追踪工作台">
+  <title>调用日志 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
+  <script defer src="/assets/app.js?v=linear-v5"></script>
+</head>
+<body data-page="logs" translate="no" class="notranslate">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
+      <a class="brand" href="/dashboard">
+        <span class="brand-mark">RG</span>
+        <span><strong>Relay Gateway</strong><small>V0.1 · 开发测试版</small></span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="nav-link" href="/dashboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+          <span>控制台</span>
+        </a>
+        <a class="nav-link" href="/profiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span>Profile 管理</span>
+        </a>
+        <a class="nav-link" href="/media">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+          <span>媒体管理</span>
+        </a>
+        <a class="nav-link active" href="/logs">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
+          <span>调用日志</span>
+        </a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <span>SQLite 审计已启用</span>
+      </div>
+    </aside>
+
+    <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="mobile-nav-toggle icon-button" id="mobile-nav-toggle" type="button" aria-label="切换侧边栏导航">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <div>
+            <p class="eyebrow"><span class="status-dot"></span>OBSERVABILITY</p>
+            <h1>调用日志与链路追踪</h1>
+          </div>
+        </div>
+        <div class="account">
+          <div class="account-pill" title="当前登录用户">
+            <span class="account-avatar" aria-hidden="true">U</span>
+            <span id="current-user">—</span>
+          </div>
+          <button class="button button-danger-ghost" id="clear-logs" type="button" title="永久清空全部调用日志">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+            <span>清空日志</span>
+          </button>
+          <button class="button button-ghost-bordered" id="logout-button" type="button" title="退出登录">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            <span>退出</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 双栏调用追踪工作台 -->
+      <div class="logs-workbench">
+        <!-- 左侧：日志检索与调用流 -->
+        <section class="panel logs-list-pane">
+          <form class="filter-bar" id="log-filters" autocomplete="off">
+            <div class="filter-row">
+              <!-- 关键词快速检索 -->
+              <div class="filter-field search-field">
+                <svg class="field-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input name="q" aria-label="搜索" placeholder="搜索 Prompt、路径或任务 ID" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+              </div>
+
+              <!-- 调用日期 -->
+              <div class="filter-field custom-select-field" id="date-select-field">
+                <input type="hidden" id="date-preset" value="all">
+                <button type="button" class="custom-select-trigger" id="date-select-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="调用日期">
+                  <span class="custom-select-text" id="date-select-label">📅 全部日期</span>
+                  <span class="custom-select-arrow">▾</span>
+                </button>
+                <div class="combobox-dropdown custom-select-dropdown hidden" id="date-select-dropdown" role="listbox">
+                  <div class="combobox-item all-option highlighted" data-value="all">📅 全部日期</div>
+                  <div class="combobox-item" data-value="today">📅 今天</div>
+                  <div class="combobox-item" data-value="yesterday">📅 昨天</div>
+                  <div class="combobox-item" data-value="7d">📅 最近 7 天</div>
+                  <div class="combobox-item" data-value="30d">📅 最近 30 天</div>
+                  <div class="combobox-item" data-value="custom">📅 自定义日期...</div>
+                </div>
+              </div>
+
+              <!-- 渠道 -->
+              <div class="filter-field custom-select-field" id="channel-select-field">
+                <input type="hidden" name="channel_id" id="channel-filter-select" value="">
+                <button type="button" class="custom-select-trigger" id="channel-select-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="渠道">
+                  <span class="custom-select-text" id="channel-select-label">🏷️ 全部渠道</span>
+                  <span class="custom-select-arrow">▾</span>
+                </button>
+                <div class="combobox-dropdown custom-select-dropdown hidden" id="channel-select-dropdown" role="listbox">
+                  <div class="combobox-item all-option highlighted" data-value="">🏷️ 全部渠道</div>
+                </div>
+              </div>
+
+              <!-- 模型筛选 -->
+              <div class="filter-field model-combobox-field" id="model-combobox">
+                <input name="model" id="model-filter-input" aria-label="模型名称" placeholder="🤖 全部模型 (输入筛选)" autocomplete="off">
+                <button type="button" class="combobox-arrow" id="model-combobox-arrow" aria-label="展开模型列表">▾</button>
+                <div class="combobox-dropdown hidden" id="model-combobox-dropdown" role="listbox"></div>
+              </div>
+
+              <!-- 调用状态 -->
+              <div class="filter-field custom-select-field" id="outcome-select-field">
+                <input type="hidden" name="outcome" id="outcome-filter-input" value="">
+                <button type="button" class="custom-select-trigger" id="outcome-select-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="调用状态">
+                  <span class="custom-select-text" id="outcome-select-label">🚥 全部状态</span>
+                  <span class="custom-select-arrow">▾</span>
+                </button>
+                <div class="combobox-dropdown custom-select-dropdown hidden" id="outcome-select-dropdown" role="listbox">
+                  <div class="combobox-item all-option highlighted" data-value="">🚥 全部状态</div>
+                  <div class="combobox-item" data-value="success">🟢 成功 (Success)</div>
+                  <div class="combobox-item" data-value="error">🔴 错误 (Error)</div>
+                  <div class="combobox-item" data-value="cancelled">⚪ 取消/中断</div>
+                </div>
+              </div>
+
+              <!-- 操作按钮 -->
+              <div class="filter-actions">
+                <button class="button primary" type="submit" title="执行筛选">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  <span>筛选</span>
+                </button>
+                <button class="button ghost" id="reset-filters-btn" type="button" title="重置筛选条件">重置</button>
+              </div>
+            </div>
+
+            <!-- 自定义日期展开行 -->
+            <div class="filter-row custom-date-row hidden" id="custom-date-row">
+              <div class="filter-field date-field">
+                <span class="field-label">开始日期</span>
+                <input name="from" id="filter-from-date" type="date" aria-label="开始日期">
+              </div>
+              <div class="filter-field date-field">
+                <span class="field-label">结束日期</span>
+                <input name="to" id="filter-to-date" type="date" aria-label="结束日期">
+              </div>
+            </div>
+          </form>
+
+          <div class="logs-stream-wrap">
+            <div class="logs-stream" id="log-list" role="list"></div>
+          </div>
+
+          <div class="empty hidden" id="logs-empty">当前筛选条件下没有调用记录。</div>
+
+          <div class="pagination">
+            <button class="button ghost" id="prev-page" type="button">上一页</button>
+            <span id="page-info">第 1 页</span>
+            <button class="button ghost" id="next-page" type="button">下一页</button>
+          </div>
+        </section>
+
+        <!-- 右侧：全量深度报文检查器 (Inspector) -->
+        <section class="panel logs-inspector-pane" id="logs-inspector">
+          <div class="inspector-empty" id="inspector-empty">
+            <div class="inspector-empty-icon">🔍</div>
+            <h3>等待选择调用记录</h3>
+            <p>点击左侧列表中任意一行，即可在此实时直观审查请求、返回与全量报文详情。</p>
+          </div>
+
+          <div class="inspector-content hidden" id="inspector-content">
+            <div class="inspector-header">
+              <div class="inspector-title-area">
+                <div class="inspector-eyebrow-row">
+                  <p class="eyebrow"><span class="status-dot"></span>TRACE INSPECTOR</p>
+                  <!-- 移动端关闭详情/返回列表按钮 -->
+                  <button class="button ghost compact-btn mobile-inspector-close" id="mobile-inspector-back" type="button" title="返回列表">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                    <span>返回列表</span>
+                  </button>
+                </div>
+                <div class="inspector-id-row">
+                  <h2 id="detail-title">—</h2>
+                  <div class="inspector-quick-actions">
+                    <button class="button ghost compact-btn" id="copy-log-id" type="button">复制 ID</button>
+                    <button class="button ghost compact-btn" id="copy-log-curl" type="button">复制 cURL</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="detail-summary" id="detail-summary"></div>
+
+            <!-- 检查器选项卡 -->
+            <div class="tabs log-inspector-tabs" role="tablist" aria-label="日志检查分类">
+              <button class="tab active" type="button" role="tab" aria-selected="true" data-log-tab="visual">💡 直观预览</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-log-tab="request">📥 完整请求</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-log-tab="response">📤 完整返回</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-log-tab="trace">⚡ 路由链路</button>
+            </div>
+
+            <!-- Tab 1: 直观交互视图 -->
+            <div class="inspector-tab-panel" data-log-panel="visual">
+              <div class="visual-error-card hidden" id="visual-error-card"></div>
+
+              <div class="visual-chat-view" id="visual-chat-view">
+                <div class="visual-card">
+                  <div class="visual-card-header">
+                    <div class="visual-card-title">
+                      <span class="role-indicator user">User</span>
+                      <strong>用户请求 (Prompt)</strong>
+                    </div>
+                    <button class="button ghost compact-btn" id="copy-visual-prompt" type="button">复制</button>
+                  </div>
+                  <div class="visual-body" id="visual-prompt-body"></div>
+                </div>
+
+                <div class="visual-card visual-response-card">
+                  <div class="visual-card-header">
+                    <div class="visual-card-title">
+                      <span class="role-indicator assistant">AI</span>
+                      <strong>模型回复 (Response)</strong>
+                    </div>
+                    <button class="button ghost compact-btn" id="copy-visual-response" type="button">复制</button>
+                  </div>
+                  <div class="visual-body" id="visual-response-body"></div>
+                  <div class="visual-media-view hidden" id="visual-media-view"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab 2: 完整请求报文 -->
+            <div class="inspector-tab-panel hidden" data-log-panel="request">
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>请求头 (Headers)</strong>
+                  <button class="button ghost compact-btn" id="copy-headers-btn" type="button">复制 Headers</button>
+                </div>
+                <pre id="detail-headers"></pre>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>完整请求体 (Request Body JSON)</strong>
+                  <button class="button ghost compact-btn" id="copy-request-btn" type="button">复制 Request JSON</button>
+                </div>
+                <pre id="detail-request"></pre>
+              </div>
+            </div>
+
+            <!-- Tab 3: 完整返回报文 -->
+            <div class="inspector-tab-panel hidden" data-log-panel="response">
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>完整响应体 (Response Body JSON)</strong>
+                  <button class="button ghost compact-btn" id="copy-response-btn" type="button">复制 Response JSON</button>
+                </div>
+                <pre id="detail-response"></pre>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>流式输出文本 (Stream Text)</strong>
+                  <button class="button ghost compact-btn" id="copy-stream-btn" type="button">复制流式文本</button>
+                </div>
+                <pre id="detail-stream"></pre>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>错误堆栈与信息 (Error Message)</strong>
+                </div>
+                <pre id="detail-error"></pre>
+              </div>
+            </div>
+
+            <!-- Tab 4: 路由与上游尝试 -->
+            <div class="inspector-tab-panel hidden" data-log-panel="trace">
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>上游尝试与故障转移 (Upstream Attempts)</strong>
+                </div>
+                <pre id="detail-upstream"></pre>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>生命周期时序 (Lifecycle Events)</strong>
+                </div>
+                <ol class="timeline" id="detail-events"></ol>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>任务聚合 (Task Run)</strong>
+                </div>
+                <pre id="detail-task-run"></pre>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>任务事件 (Task Events)</strong>
+                </div>
+                <ol class="timeline" id="detail-task-events"></ol>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>任务尝试 (Task Attempts)</strong>
+                </div>
+                <ol class="timeline" id="detail-attempts"></ol>
+              </div>
+
+              <div class="code-box-wrapper">
+                <div class="code-box-header">
+                  <strong>媒体资产 (Media Assets)</strong>
+                </div>
+                <ol class="timeline" id="detail-media-assets"></ol>
+              </div>
+            </div>
+
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- 保持旧版模态框容器兼容性（移动端或全屏查看） -->
+  <dialog id="log-dialog" class="hidden">
+    <button id="close-detail" class="hidden" aria-label="关闭"></button>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+</body>
+</html>

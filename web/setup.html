@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="google" content="notranslate">
+  <meta name="description" content="Relay Gateway 初始化向导">
+  <title>系统初始化 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
+  <script defer src="/assets/app.js?v=linear-v5"></script>
+</head>
+<body data-page="setup" class="auth-page" translate="no">
+  <main class="auth-card">
+    <div class="brand auth-brand">
+      <span class="brand-mark">RG</span>
+      <span><strong>Relay Gateway</strong><small>系统首次初始化向导</small></span>
+    </div>
+
+    <div id="setup-step">
+      <p class="eyebrow"><span class="status-dot"></span>LOCAL SETUP</p>
+      <h1>创建管理员账号</h1>
+      <p class="muted">首次设置只允许从本机访问。管理员账号用于登录控制台；模型调用客户端将使用专有网关 Key。</p>
+
+      <form id="setup-form" class="form-stack">
+        <label>用户名
+          <input name="username" minlength="3" maxlength="64" required autocomplete="username" autofocus placeholder="设置管理员用户名（3-64位）">
+        </label>
+        <label>初始密码
+          <input name="password" type="password" minlength="12" maxlength="128" required autocomplete="new-password" placeholder="设置强密码（至少12位）">
+        </label>
+        <label>确认密码
+          <input name="confirm_password" type="password" minlength="12" maxlength="128" required autocomplete="new-password" placeholder="再次输入相同的密码">
+        </label>
+        <button class="button primary block" type="submit">
+          <span>完成初始化并生成 Key</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </form>
+    </div>
+
+    <div id="setup-result" class="hidden">
+      <p class="eyebrow"><span class="status-dot"></span>READY</p>
+      <h1>网关已成功初始化</h1>
+      <p class="muted">系统已自动生成外部客户端访问所需的网关 API Key。<strong>明文 Key 仅展示这一次，请务必立即妥善保存。</strong></p>
+
+      <div class="secret-output">
+        <code id="setup-token"></code>
+        <button class="button primary" id="setup-copy" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          <span>复制 Key</span>
+        </button>
+      </div>
+
+      <a class="button primary block" href="/dashboard">
+        <span>进入控制台仪表盘</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </a>
+    </div>
+
+    <p class="form-error" id="auth-error" role="alert"></p>
+  </main>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="google" content="notranslate">
+  <meta name="description" content="Relay Gateway 管理员登录">
+  <title>管理员登录 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
+  <script defer src="/assets/app.js?v=linear-v5"></script>
+</head>
+<body data-page="login" class="auth-page" translate="no">
+  <main class="auth-card">
+    <div class="brand auth-brand">
+      <span class="brand-mark">RG</span>
+      <span><strong>Relay Gateway</strong><small>AI 模型聚合分发控制台</small></span>
+    </div>
+    <p class="eyebrow"><span class="status-dot"></span>ADMIN ACCESS</p>
+    <h1>管理员登录</h1>
+    <p class="muted">使用管理员账号登录控制台，集中管理模型路由、上游渠道及调用审计。</p>
+
+    <form id="login-form" class="form-stack">
+      <label>用户名
+        <input name="username" required autocomplete="username" autofocus placeholder="输入管理员用户名">
+      </label>
+      <label>密码
+        <input name="password" type="password" required autocomplete="current-password" placeholder="输入密码">
+      </label>
+      <button class="button primary block" type="submit">
+        <span>登 录</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </button>
+    </form>
+
+    <p class="form-error" id="auth-error" role="alert"></p>
+  </main>
+</body>
+</html>

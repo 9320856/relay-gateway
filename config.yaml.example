@@ -1,0 +1,4 @@
+# Relay Gateway V0.1 runtime configuration
+# Provider channels, API keys and administrator credentials are managed in SQLite.
+port: 8000
+database_path: gateway.db

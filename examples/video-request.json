@@ -1,0 +1,8 @@
+{
+  "model": "grok-imagine-video-1.5",
+  "prompt": "海边日落，电影感镜头，海浪缓慢拍岸",
+  "seconds": 6,
+  "size": "16:9",
+  "quality": "720p",
+  "generate_audio": true
+}
