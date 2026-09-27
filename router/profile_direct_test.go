@@ -26,6 +26,9 @@ func TestProfileEngineDirectChatUsesPublishedBinding(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer profile-key" {
 			t.Fatalf("authorization header = %q", r.Header.Get("Authorization"))
 		}
+		if got := r.Header.Get("X-Tenant"); got != "tenant-from-channel" {
+			t.Errorf("channel custom header missing: %q", got)
+		}
 		body, _ := io.ReadAll(r.Body)
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err != nil || payload["model"] != "provider-chat" {
@@ -36,6 +39,7 @@ func TestProfileEngineDirectChatUsesPublishedBinding(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	channel := &db.ChannelModel{ID: "profile-direct-channel", Name: "profile-direct-channel", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "profile-key", Enabled: true, Priority: 1, Weight: 1, ModelsRaw: "chat-model", ModelMapRaw: "{\"chat-model\":\"provider-chat\"}"}
+	channel.HeadersRaw = `{"X-Tenant":"tenant-from-channel"}`
 	if err := db.SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}

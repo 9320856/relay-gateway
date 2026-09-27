@@ -72,8 +72,9 @@ func TestBackgroundPollerCancellationIsRecordedAndRescheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
 	claimed, err := (&BackgroundPoller{Owner: "worker-a", RetryAfter: time.Hour, Poll: func(ctx context.Context, _ *db.TaskRun) (Observation, error) {
+		cancel()
 		return Observation{Status: "processing"}, ctx.Err()
 	}}).RunOnce(ctx)
 	if !claimed || !errors.Is(err, context.Canceled) {
@@ -85,6 +86,35 @@ func TestBackgroundPollerCancellationIsRecordedAndRescheduled(t *testing.T) {
 	}
 	if loaded.PollCount != 1 || loaded.PollFailureCount != 1 || loaded.LeaseOwner != "" {
 		t.Fatalf("canceled poll state = %+v", loaded)
+	}
+}
+
+func TestBackgroundPollerCanceledBeforeClaimDoesNotPollOrMutate(t *testing.T) {
+	if err := db.InitDB(t.TempDir() + "/cancel-before-claim.db"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now()
+	run := &db.TaskRun{ID: "cancel-before-claim", TaskKind: "video", Operation: "video.create", ChannelID: "c", PollingMode: "background", NextPollAt: &now}
+	if err := db.CreateTaskRun(run); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	claimed, err := (&BackgroundPoller{Owner: "worker-a", Poll: func(context.Context, *db.TaskRun) (Observation, error) {
+		called = true
+		return Observation{}, nil
+	}}).RunOnce(ctx)
+	if claimed || called || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled claim: claimed=%v called=%v err=%v", claimed, called, err)
+	}
+	loaded, err := db.GetTaskRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PollCount != 0 || loaded.LeaseOwner != "" {
+		t.Fatalf("canceled claim changed state: %+v", loaded)
 	}
 }
 

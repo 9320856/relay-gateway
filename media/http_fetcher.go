@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/idna"
@@ -132,18 +133,29 @@ func (f HTTPSourceFetcher) Fetch(ctx context.Context, result MediaResult) (Fetch
 		redirects = 5
 	}
 	client := f.Client
+	var ownedTransport *http.Transport
 	if client == nil {
+		ownedTransport = f.newDefaultMediaTransport()
 		client = &http.Client{
-			Transport: f.newDefaultMediaTransport(),
+			Transport: ownedTransport,
 			Timeout:   60 * time.Second,
 		}
 	} else {
 		clone := *client
 		if clone.Transport == nil {
-			clone.Transport = f.newDefaultMediaTransport()
+			ownedTransport = f.newDefaultMediaTransport()
+			clone.Transport = ownedTransport
 		}
 		client = &clone
 	}
+	// The private pool cannot be reused by another Fetch. Transfer its cleanup
+	// to the returned body on success; close it here on every failure path.
+	bodyOwnsTransport := false
+	defer func() {
+		if ownedTransport != nil && !bodyOwnsTransport {
+			ownedTransport.CloseIdleConnections()
+		}
+	}()
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= redirects {
 			return fmt.Errorf("too many media redirects")
@@ -182,7 +194,27 @@ func (f HTTPSourceFetcher) Fetch(ctx context.Context, result MediaResult) (Fetch
 		resp.Body.Close()
 		return FetchedSource{}, fmt.Errorf("unsupported upstream media type")
 	}
-	return FetchedSource{Body: &limitedBody{ReadCloser: resp.Body, remaining: max}, ContentType: contentType}, nil
+	var body io.ReadCloser = resp.Body
+	if ownedTransport != nil {
+		body = &transportBody{ReadCloser: body, transport: ownedTransport}
+		bodyOwnsTransport = true
+	}
+	return FetchedSource{Body: &limitedBody{ReadCloser: body, remaining: max}, ContentType: contentType}, nil
+}
+
+type transportBody struct {
+	io.ReadCloser
+	transport *http.Transport
+	once      sync.Once
+	err       error
+}
+
+func (b *transportBody) Close() error {
+	b.once.Do(func() {
+		b.err = b.ReadCloser.Close()
+		b.transport.CloseIdleConnections()
+	})
+	return b.err
 }
 
 func allowedContentType(raw string, allowed map[string]struct{}) (string, bool) {
@@ -270,22 +302,25 @@ func (f HTTPSourceFetcher) validateURL(ctx context.Context, raw string) (mediaTa
 	if err != nil || len(ips) == 0 {
 		return mediaTarget{}, fmt.Errorf("unable to resolve media host")
 	}
-	allFakeIP := f.isTrustedFakeIPHost(host)
+	trustedFakeIP := f.isTrustedFakeIPHost(host)
+	hasFakeIP, hasPublicIP := false, false
 	validated := make([]net.IP, 0, len(ips))
 	for _, ipAddr := range ips {
 		ip := ipAddr.IP
 		if ValidatePublicIP(ip) != nil {
-			if !allFakeIP || !isFakeIP(ip) {
+			if !trustedFakeIP || !isFakeIP(ip) {
 				return mediaTarget{}, fmt.Errorf("media host resolved to non-public address %s: access to private or special-use address is prohibited", ip.String())
 			}
-		} else if allFakeIP {
-			// A trusted Fake-IP host must resolve exclusively into 198.18.0.0/15.
-			// Mixed public/Fake-IP answers fail closed.
-			return mediaTarget{}, fmt.Errorf("trusted Fake-IP media host returned a non-Fake-IP address")
+			hasFakeIP = true
+		} else {
+			hasPublicIP = true
 		}
 		validated = append(validated, cloneIP(ip))
 	}
-	return mediaTarget{host: host, validatedIPs: validated, fakeIP: allFakeIP}, nil
+	if hasFakeIP && hasPublicIP {
+		return mediaTarget{}, fmt.Errorf("trusted Fake-IP media host returned mixed public and Fake-IP addresses")
+	}
+	return mediaTarget{host: host, validatedIPs: validated, fakeIP: hasFakeIP}, nil
 }
 
 func (f HTTPSourceFetcher) isTrustedFakeIPHost(host string) bool {
@@ -321,8 +356,18 @@ func cloneIP(ip net.IP) net.IP {
 }
 
 func isFakeIP(ip net.IP) bool {
-	v4 := ip.To4()
-	return v4 != nil && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+	}
+	return isBenchmarkIPv6(ip)
+}
+
+// 2001:2::/48 is IANA's non-public IPv6 benchmarking prefix and is used by
+// Clash Verge for IPv6 Fake-IP. Other private IPv6 ranges are never exempted.
+func isBenchmarkIPv6(ip net.IP) bool {
+	v6 := ip.To16()
+	return ip.To4() == nil && v6 != nil && v6[0] == 0x20 && v6[1] == 0x01 &&
+		v6[2] == 0x00 && v6[3] == 0x02 && v6[4] == 0x00 && v6[5] == 0x00
 }
 
 // TrustedFakeIPHost returns the normalized source hostname when sourceURL and
@@ -368,6 +413,9 @@ func registrableHTTPHost(raw string) (string, bool) {
 func ValidatePublicIP(ip net.IP) error {
 	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || !ip.IsGlobalUnicast() {
 		return fmt.Errorf("access to private or non-global media address is prohibited")
+	}
+	if isBenchmarkIPv6(ip) {
+		return fmt.Errorf("access to private or special-use address is prohibited")
 	}
 	if v4 := ip.To4(); v4 != nil {
 		if (v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127) ||

@@ -50,6 +50,30 @@ func DBForContext(ctx context.Context) *gorm.DB {
 	return DB
 }
 
+// HasContextTransaction reports transaction ownership independently of GORM
+// session pointers, which change when WithContext creates a SQL session.
+func HasContextTransaction(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	tx, ok := ctx.Value(txContextKey{}).(*gorm.DB)
+	return ok && tx != nil
+}
+
+// SQLDBForContext preserves a caller's transaction and binds SQL and connection
+// pool waits to its cancellation/deadline. DBForContext remains the raw resolver
+// for integrations that need to inspect transaction ownership.
+func SQLDBForContext(ctx context.Context) *gorm.DB {
+	conn := DBForContext(ctx)
+	if conn == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return conn.WithContext(ctx)
+}
+
 const SchemaVersion = "3"
 
 const previousSchemaVersion = "2"
@@ -80,7 +104,7 @@ var ErrDBEncryptionKeyRequired = errors.New("RELAY_DB_ENCRYPTION_KEY is required
 var (
 	DB                  *gorm.DB
 	activeChannelsCache atomic.Pointer[[]config.UpstreamChannel]
-	videoTaskCache      sync.Map
+	videoTaskCache      = newTaskMappingCache(10000, videoTaskCacheTTL)
 	OnChannelSaved      func(channelID string)
 	// BeforeClose lets background services finish database work before the
 	// shared connection is cleared and closed. It must return before Close can
@@ -383,6 +407,7 @@ func InitDB(dbPath string) (err error) {
 	DB = opened
 	databasePath = dbPath
 	clearVideoTaskCache()
+	videoTaskCache.startCleanup(time.Minute)
 	activeChannelsCache.Store(nil)
 	if oldDB != nil {
 		if oldSQLDB, oldErr := oldDB.DB(); oldErr == nil {
@@ -718,11 +743,15 @@ func MigrateLegacyDatabaseEncryption(conn *gorm.DB) error {
 }
 
 func hydrateChannelKeys(cm *ChannelModel) {
-	if DB == nil || cm == nil || cm.ID == "" {
+	hydrateChannelKeysOn(DB, cm)
+}
+
+func hydrateChannelKeysOn(conn *gorm.DB, cm *ChannelModel) {
+	if conn == nil || cm == nil || cm.ID == "" {
 		return
 	}
 	var keys []ChannelKeyModel
-	if DB.Where("channel_id = ?", cm.ID).Order("position asc").Find(&keys).Error != nil {
+	if conn.Where("channel_id = ?", cm.ID).Order("position asc").Find(&keys).Error != nil {
 		return
 	}
 	cm.APIKeys = make([]string, 0, len(keys))
@@ -739,7 +768,7 @@ func hydrateChannelKeys(cm *ChannelModel) {
 		cm.APIKey = cm.APIKeys[0]
 	}
 	var mappings []ModelMappingModel
-	if DB.Where("channel_id = ?", cm.ID).Order("source_model asc").Find(&mappings).Error == nil && len(mappings) > 0 {
+	if conn.Where("channel_id = ?", cm.ID).Order("source_model asc").Find(&mappings).Error == nil && len(mappings) > 0 {
 		modelMap := make(map[string]string, len(mappings))
 		for _, mapping := range mappings {
 			if strings.TrimSpace(mapping.SourceModel) != "" && strings.TrimSpace(mapping.TargetModel) != "" {
@@ -840,7 +869,7 @@ func GetChannelModel(id string) (*ChannelModel, error) {
 }
 
 func GetChannelModelContext(ctx context.Context, id string) (*ChannelModel, error) {
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -849,8 +878,8 @@ func GetChannelModelContext(ctx context.Context, id string) (*ChannelModel, erro
 		return nil, err
 	}
 	// Hydrate against the same connection while a transaction is open.
-	if conn == DB {
-		hydrateChannelKeys(&cm)
+	if !HasContextTransaction(ctx) {
+		hydrateChannelKeysOn(conn, &cm)
 		if cm.APIKeyLoadError != "" {
 			return nil, errors.New(cm.APIKeyLoadError)
 		}
@@ -873,6 +902,9 @@ func GetChannelModelContext(ctx context.Context, id string) (*ChannelModel, erro
 			return nil, errors.New(cm.APIKeyLoadError)
 		}
 	}
+	if err := conn.Statement.Context.Err(); err != nil {
+		return nil, err
+	}
 	return &cm, nil
 }
 
@@ -884,23 +916,37 @@ func ToggleChannel(id string) (bool, error) {
 // one is present. The cache refresh is intentionally deferred until commit by
 // the caller (the in-memory cache is not part of the SQLite transaction).
 func ToggleChannelContext(ctx context.Context, id string) (bool, error) {
-	cm, err := GetChannelModelContext(ctx, id)
-	if err != nil {
-		return false, err
+	conn := SQLDBForContext(ctx)
+	if conn == nil {
+		return false, gorm.ErrRecordNotFound
 	}
-	cm.Enabled = !cm.Enabled
-	conn := DBForContext(ctx)
-	err = conn.Model(&ChannelModel{}).Where("id = ?", id).Update("enabled", cm.Enabled).Error
+	var enabled bool
+	toggle := func(tx *gorm.DB) error {
+		var cm ChannelModel
+		if err := tx.First(&cm, "id = ?", id).Error; err != nil {
+			return err
+		}
+		enabled = !cm.Enabled
+		return tx.Model(&ChannelModel{}).Where("id = ?", id).UpdateColumns(map[string]any{
+			"enabled": enabled, "updated_at": channelConfigurationTime(cm.UpdatedAt),
+		}).Error
+	}
+	var err error
+	if HasContextTransaction(ctx) {
+		err = toggle(conn)
+	} else {
+		err = conn.Transaction(toggle)
+	}
 	if err == nil {
 		invalidateVideoTaskCacheForChannel(id)
-		if conn == DB {
+		if !HasContextTransaction(ctx) {
 			RefreshActiveChannelsCache()
 			if OnChannelSaved != nil {
 				OnChannelSaved(id)
 			}
 		}
 	}
-	return cm.Enabled, err
+	return enabled, err
 }
 
 func DeleteChannel(id string) error {
@@ -908,7 +954,7 @@ func DeleteChannel(id string) error {
 }
 
 func DeleteChannelContext(ctx context.Context, id string) error {
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return nil
 	}
@@ -925,7 +971,7 @@ func DeleteChannelContext(ctx context.Context, id string) error {
 		return tx.Delete(&ChannelModel{}, "id = ?", id).Error
 	}
 	var err error
-	if conn == DB {
+	if !HasContextTransaction(ctx) {
 		err = conn.Transaction(deleteFn)
 	} else {
 		err = deleteFn(conn)
@@ -934,7 +980,7 @@ func DeleteChannelContext(ctx context.Context, id string) error {
 		// The request audit middleware may be wrapping this operation in an
 		// outer transaction. In that case it invalidates the cache only after
 		// commit; invalidating here would make a rollback observable.
-		if conn == DB {
+		if !HasContextTransaction(ctx) {
 			invalidateVideoTaskCacheForChannel(id)
 			RefreshActiveChannelsCache()
 		}
@@ -947,7 +993,7 @@ func SaveChannelModel(cm *ChannelModel) error {
 }
 
 func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
@@ -1023,6 +1069,10 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 		found := tx.First(&existing, "id = ?", cm.ID).Error == nil
 		if found {
 			cm.CreatedAt = existing.CreatedAt
+			// Windows wall-clock resolution can produce identical timestamps for
+			// successive saves. Keep the persisted discovery revision monotonic.
+			updatedAt := channelConfigurationTime(existing.UpdatedAt)
+			cm.UpdatedAt = updatedAt
 			if cm.LastStatus == "" {
 				cm.LastStatus = existing.LastStatus
 			}
@@ -1032,7 +1082,7 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 			if cm.LastErrorMessage == "" {
 				cm.LastErrorMessage = existing.LastErrorMessage
 			}
-			if err := tx.Save(cm).Error; err != nil {
+			if err := tx.Session(&gorm.Session{NowFunc: func() time.Time { return updatedAt }}).Save(cm).Error; err != nil {
 				return err
 			}
 		} else if err := tx.Create(cm).Error; err != nil {
@@ -1071,13 +1121,13 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 		return nil
 	}
 	var err error
-	if conn == DB {
+	if !HasContextTransaction(ctx) {
 		err = conn.Transaction(saveFn)
 	} else {
 		err = saveFn(conn)
 	}
 	if err == nil {
-		if conn == DB {
+		if !HasContextTransaction(ctx) {
 			RefreshActiveChannelsCache()
 			if OnChannelSaved != nil {
 				OnChannelSaved(cm.ID)
@@ -1097,7 +1147,7 @@ func UpdateChannelHealth(id, status string, latencyMs int, errMsg string, synced
 // network timeout from holding SQLite's single writer connection while still
 // allowing the health row and its audit event to commit atomically.
 func UpdateChannelHealthContext(ctx context.Context, id, status string, latencyMs int, errMsg string, syncedModels []string) error {
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
@@ -1125,7 +1175,7 @@ func SetSetting(key, value string) error {
 }
 
 func SetSettingContext(ctx context.Context, key, value string) error {
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
@@ -1178,14 +1228,14 @@ func RecordTaskMappingContext(ctx context.Context, mapping TaskMapping) error {
 	if mapping.CreatedAt.IsZero() {
 		mapping.CreatedAt = time.Now().UTC()
 	}
-	conn := DBForContext(ctx)
+	conn := SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
 	if err := conn.Save(&mapping).Error; err != nil {
 		return err
 	}
-	if conn == DB {
+	if !HasContextTransaction(ctx) {
 		PublishTaskMappingCache(mapping)
 	}
 	return nil
@@ -1354,7 +1404,7 @@ func PublishTaskMappingCache(mapping TaskMapping) {
 	if mapping.CreatedAt.IsZero() {
 		mapping.CreatedAt = time.Now().UTC()
 	}
-	videoTaskCache.Store(mapping.TaskID, videoTaskCacheEntry{mapping: mapping, cachedAt: time.Now().UTC()})
+	videoTaskCache.publish(mapping, time.Now().UTC())
 }
 
 // PublishVideoTaskCache is the compatibility wrapper for callers that only
@@ -1369,22 +1419,14 @@ func PublishVideoTaskCache(taskID, channelID string, createdAt ...time.Time) {
 }
 
 func clearVideoTaskCache() {
-	videoTaskCache.Range(func(key, _ any) bool {
-		videoTaskCache.Delete(key)
-		return true
-	})
+	videoTaskCache.clear()
 }
 
 func invalidateVideoTaskCacheForChannel(channelID string) {
 	if strings.TrimSpace(channelID) == "" {
 		return
 	}
-	videoTaskCache.Range(func(key, value any) bool {
-		if entry, ok := value.(videoTaskCacheEntry); ok && entry.mapping.ChannelID == channelID {
-			videoTaskCache.Delete(key)
-		}
-		return true
-	})
+	videoTaskCache.invalidateChannel(channelID)
 }
 
 // InvalidateTaskCacheForChannel is called by transactional callers after a
@@ -1410,16 +1452,20 @@ func ClearTaskMappingCache() {
 // authorize or route a known task kind must use GetTaskMappingForKind instead,
 // so an image mapping cannot be reused as a video mapping (or vice versa).
 func GetTaskMapping(taskID string) *TaskMapping {
+	return GetTaskMappingContext(context.Background(), taskID)
+}
+
+func GetTaskMappingContext(ctx context.Context, taskID string) *TaskMapping {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return nil
 	}
-	if mapping := getTaskMappingExact(taskID); mapping != nil {
+	if mapping := getTaskMappingExactContext(ctx, taskID); mapping != nil {
 		return mapping
 	}
 	if !strings.HasPrefix(taskID, ImageTaskMappingLookupPrefix) {
 		legacyImageTaskID := ImageTaskMappingLookupPrefix + taskID
-		return getTaskMappingExact(legacyImageTaskID)
+		return getTaskMappingExactContext(ctx, legacyImageTaskID)
 	}
 	return nil
 }
@@ -1434,13 +1480,17 @@ func GetTaskMapping(taskID string) *TaskMapping {
 // a blank TaskKind therefore matches video only. New image mappings must carry
 // TaskKind == "image".
 func GetTaskMappingForKind(taskID, taskKind string) *TaskMapping {
+	return GetTaskMappingForKindContext(context.Background(), taskID, taskKind)
+}
+
+func GetTaskMappingForKindContext(ctx context.Context, taskID, taskKind string) *TaskMapping {
 	taskID = strings.TrimSpace(taskID)
 	taskKind = strings.ToLower(strings.TrimSpace(taskKind))
 	if taskID == "" || taskKind == "" {
 		return nil
 	}
 
-	if mapping := getTaskMappingExact(taskID); taskMappingMatchesKind(mapping, taskKind) {
+	if mapping := getTaskMappingExactContext(ctx, taskID); taskMappingMatchesKind(mapping, taskKind) {
 		return mapping
 	}
 	if taskKind != "image" || strings.HasPrefix(taskID, ImageTaskMappingLookupPrefix) {
@@ -1448,7 +1498,7 @@ func GetTaskMappingForKind(taskID, taskKind string) *TaskMapping {
 	}
 
 	legacyImageTaskID := ImageTaskMappingLookupPrefix + taskID
-	if mapping := getTaskMappingExact(legacyImageTaskID); taskMappingMatchesKind(mapping, taskKind) {
+	if mapping := getTaskMappingExactContext(ctx, legacyImageTaskID); taskMappingMatchesKind(mapping, taskKind) {
 		return mapping
 	}
 	return nil
@@ -1475,35 +1525,44 @@ func effectiveTaskMappingKind(taskKind string) string {
 }
 
 func getTaskMappingExact(taskID string) *TaskMapping {
-	if mapping := getCachedTaskMapping(taskID); mapping != nil {
-		return mapping
+	return getTaskMappingExactContext(context.Background(), taskID)
+}
+
+func getTaskMappingExactContext(ctx context.Context, taskID string) *TaskMapping {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return loadTaskMapping(taskID)
+	if ctx.Err() != nil {
+		return nil
+	}
+	if !HasContextTransaction(ctx) {
+		if mapping := getCachedTaskMapping(taskID); mapping != nil {
+			return mapping
+		}
+	}
+	return loadTaskMappingContext(ctx, taskID)
 }
 
 func getCachedTaskMapping(taskID string) *TaskMapping {
-	value, ok := videoTaskCache.Load(taskID)
-	if !ok {
-		return nil
-	}
-	entry, ok := value.(videoTaskCacheEntry)
-	if !ok || entry.cachedAt.IsZero() || time.Since(entry.cachedAt) > videoTaskCacheTTL {
-		videoTaskCache.Delete(taskID)
-		return nil
-	}
-	mapping := entry.mapping
-	return &mapping
+	return videoTaskCache.get(taskID, time.Now().UTC())
 }
 
 func loadTaskMapping(taskID string) *TaskMapping {
-	if DB == nil {
+	return loadTaskMappingContext(context.Background(), taskID)
+}
+
+func loadTaskMappingContext(ctx context.Context, taskID string) *TaskMapping {
+	conn := SQLDBForContext(ctx)
+	if conn == nil {
 		return nil
 	}
 	var mapping TaskMapping
-	if err := DB.First(&mapping, "task_id = ?", taskID).Error; err != nil {
+	if err := conn.First(&mapping, "task_id = ?", taskID).Error; err != nil {
 		return nil
 	}
-	PublishTaskMappingCache(mapping)
+	if !HasContextTransaction(ctx) {
+		PublishTaskMappingCache(mapping)
+	}
 	return &mapping
 }
 
@@ -1578,6 +1637,7 @@ func Close() error {
 	}
 	initMu.Lock()
 	defer initMu.Unlock()
+	videoTaskCache.stopCleanup()
 	if DB == nil {
 		return nil
 	}

@@ -90,7 +90,7 @@ type ProfileRevisionReferences struct {
 var terminalTaskStatuses = []string{"completed", "succeeded", "failed", "cancelled", "canceled", "expired", "timeout", "timed_out"}
 
 func profileDB(ctx context.Context) (*gorm.DB, error) {
-	db := DBForContext(ctx)
+	db := SQLDBForContext(ctx)
 	if db == nil {
 		return nil, errors.New("database is not initialized")
 	}
@@ -139,8 +139,8 @@ func CreateProtocolProfileWithInitialRevisionContext(ctx context.Context, p *Pro
 		}
 		return SaveProtocolProfileRevisionContext(txCtx, r)
 	}
-	if database == DB {
-		return database.WithContext(ctx).Transaction(create)
+	if !HasContextTransaction(ctx) {
+		return database.Transaction(create)
 	}
 	return create(database)
 }
@@ -281,10 +281,10 @@ func DeleteProtocolProfileRevisionContext(ctx context.Context, profileID string,
 		}
 		return tx.Model(&ProtocolProfile{}).Where("id = ?", profileID).Update("latest_revision", latestResult.Value).Error
 	}
-	if database == DB {
-		return database.WithContext(ctx).Transaction(remove)
+	if !HasContextTransaction(ctx) {
+		return database.Transaction(remove)
 	}
-	return remove(database.WithContext(ctx))
+	return remove(database)
 }
 
 func DeleteProtocolProfileRevision(profileID string, revision int) error {
@@ -423,8 +423,8 @@ func DeleteProtocolProfileContext(ctx context.Context, profileID string) error {
 		}
 		return tx.Where("id = ?", profileID).Delete(&ProtocolProfile{}).Error
 	}
-	if db == DB {
-		return db.WithContext(ctx).Transaction(deleteProfile)
+	if !HasContextTransaction(ctx) {
+		return db.Transaction(deleteProfile)
 	}
 	return deleteProfile(db)
 }
@@ -556,9 +556,9 @@ func SetChannelProtocolBindingEnabledContext(ctx context.Context, id uint, enabl
 		binding.Enabled = enabled
 		return &binding, nil
 	}
-	if database == DB {
+	if !HasContextTransaction(ctx) {
 		var binding *ChannelProtocolBinding
-		err := database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := database.Transaction(func(tx *gorm.DB) error {
 			binding, err = setEnabled(tx)
 			return err
 		})

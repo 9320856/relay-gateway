@@ -513,7 +513,7 @@ func saveChannelWithProfileBindings(ctx context.Context, channel *db.ChannelMode
 	if database != db.DB {
 		return save(ctx)
 	}
-	return database.Transaction(func(tx *gorm.DB) error {
+	return database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return save(db.WithTx(ctx, tx))
 	})
 }
@@ -533,7 +533,7 @@ func generateUniqueChannelID(ctx context.Context, adapterType string) (string, e
 
 func generateUniqueChannelIDWithContextAndReader(ctx context.Context, adapterType string, random io.Reader) (string, error) {
 	encoding := base32.StdEncoding.WithPadding(base32.NoPadding)
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		conn = db.DB
 	}
@@ -1222,7 +1222,7 @@ func imageJobLookupIDs(taskIDs []string) []string {
 // its own request log so failed, unknown, expired, and media requests remain
 // auditable as standalone entries.
 func markMappedAsyncTaskPoll(c *gin.Context, lookupTaskID, taskKind, status string, response interface{}) {
-	mapping := db.GetTaskMappingForKind(lookupTaskID, taskKind)
+	mapping := db.GetTaskMappingForKindContext(c.Request.Context(), lookupTaskID, taskKind)
 	if mapping == nil {
 		return
 	}
@@ -2413,7 +2413,7 @@ func handlePlaygroundImageStatus(c *gin.Context) {
 
 	var targetChannel *config.UpstreamChannel
 	var err error
-	if mapping := db.GetTaskMappingForKind(lookupID, asyncTaskKindImage); mapping != nil {
+	if mapping := db.GetTaskMappingForKindContext(c.Request.Context(), lookupID, asyncTaskKindImage); mapping != nil {
 		mappedChannelID := strings.TrimSpace(mapping.ChannelID)
 		if mappedChannelID == "" {
 			err = fmt.Errorf("task [%s] has an invalid channel mapping", taskID)
@@ -2448,7 +2448,7 @@ func handlePlaygroundImageStatus(c *gin.Context) {
 	if taskID != providerTaskID {
 		setImageJobResponseIDs(resp, taskID)
 	}
-	if db.GetTaskMappingForKind(lookupID, asyncTaskKindImage) != nil {
+	if db.GetTaskMappingForKindContext(c.Request.Context(), lookupID, asyncTaskKindImage) != nil {
 		if registration, persistErr := persistImageTaskAliases(c, targetChannel.ID, taskID, resp); persistErr != nil {
 			if errors.Is(persistErr, db.ErrTaskMappingChannelConflict) {
 				c.Header("X-Relay-Task-Mapping", "conflict")
@@ -2531,7 +2531,7 @@ func handlePlaygroundVideoStatus(c *gin.Context) {
 	// explicit playground channel while local recovery catches up.
 	var targetChannel *config.UpstreamChannel
 	var err error
-	if mapping := db.GetTaskMappingForKind(taskID, asyncTaskKindVideo); mapping != nil {
+	if mapping := db.GetTaskMappingForKindContext(c.Request.Context(), taskID, asyncTaskKindVideo); mapping != nil {
 		mappedChannelID := strings.TrimSpace(mapping.ChannelID)
 		if mappedChannelID == "" {
 			err = fmt.Errorf("task [%s] has an invalid channel mapping", taskID)
@@ -2620,7 +2620,7 @@ func handleGetSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"port":                 config.GetPort(),
 		"audit_retention_days": retention,
-		"gateway_token":        security.GatewayTokenInfo(),
+		"gateway_token":        security.GatewayTokenInfoContext(c.Request.Context()),
 	})
 }
 
@@ -3674,13 +3674,9 @@ func resolveAbsoluteURL(c *gin.Context, path string) string {
 	if !strings.HasPrefix(path, "/") {
 		return path
 	}
-	scheme := "http"
-	if c.Request.TLS != nil || trustedForwardedHTTPS(c) {
-		scheme = "https"
-	}
-	host := trustedForwardedHost(c)
+	scheme, host := externalMediaAddress(c)
 	if host == "" {
-		host = c.Request.Host
+		return path
 	}
 	return fmt.Sprintf("%s://%s%s", scheme, host, path)
 }
@@ -3749,10 +3745,7 @@ func isGatewayStableVideoContentURL(c *gin.Context, rawURL string) bool {
 		// A relative URL in an API response resolves against the gateway host.
 		return strings.HasPrefix(rawURL, "/")
 	}
-	gatewayHost := trustedForwardedHost(c)
-	if gatewayHost == "" {
-		gatewayHost = c.Request.Host
-	}
+	_, gatewayHost := externalMediaAddress(c)
 	return gatewayHost != "" && strings.EqualFold(parsed.Host, gatewayHost)
 }
 
@@ -4146,7 +4139,7 @@ func auditMiddleware() gin.HandlerFunc {
 			}
 			return nil
 		}
-		entry, err := audit.Start(kind, c.Request.RemoteAddr, c.Request.Method, path, c.Request.Header)
+		entry, err := audit.StartContext(c.Request.Context(), kind, c.Request.RemoteAddr, c.Request.Method, path, c.Request.Header)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "审计日志存储暂不可用，请稍后重试"})
 			return
@@ -4169,7 +4162,7 @@ func handleGetLogs(c *gin.Context) {
 			query.To = &parsed
 		}
 	}
-	rows, total, err := audit.List(query)
+	rows, total, err := audit.ListContext(c.Request.Context(), query)
 	if err != nil {
 		internalError(c, err, "读取审计日志失败，请稍后重试")
 		return
@@ -4178,7 +4171,7 @@ func handleGetLogs(c *gin.Context) {
 }
 
 func handleGetLogDetail(c *gin.Context) {
-	detail, err := audit.GetDetail(c.Param("id"))
+	detail, err := audit.GetDetailContext(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "审计日志不存在"})
 		return

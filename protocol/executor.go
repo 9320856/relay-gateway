@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"relay-gateway/internal/httpforward"
 )
 
 var (
@@ -109,21 +111,37 @@ func (e *HTTPExecutor) ExecuteRaw(ctx context.Context, profile CompiledProfile, 
 		}
 		result := Result{HTTPStatus: resp.StatusCode, Headers: resp.Header.Clone()}
 		if resp.StatusCode >= 400 {
-			result.RawBody, _ = io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
+			result.RawBody, err = io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
 			_ = resp.Body.Close()
+			if err != nil {
+				return result, executorError("read", resp.StatusCode, mutatingMethod(op.Submit.Method), false, err)
+			}
 			if int64(len(result.RawBody)) > e.maxResponseBytes(req) {
-				return result, ErrResponseTooLarge
+				return result, executorError("read", resp.StatusCode, mutatingMethod(op.Submit.Method), false, ErrResponseTooLarge)
 			}
 			return result, executorErrorWithResponse("submit", resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), mutatingMethod(op.Submit.Method) && resp.StatusCode >= 500, false, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		}
 		if stream {
 			copyResponseHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
-			written, copyErr := io.Copy(w, io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
+			written, copyErr := httpforward.Stream(ctx, io.LimitReader(resp.Body, e.maxResponseBytes(req)), w)
+			if copyErr == nil && written == e.maxResponseBytes(req) {
+				var extra [1]byte
+				if n, readErr := resp.Body.Read(extra[:]); n > 0 {
+					copyErr = ErrResponseTooLarge
+				} else if readErr != io.EOF {
+					copyErr = readErr
+				}
+			}
 			_ = resp.Body.Close()
 			result.RawBody = nil
 			if copyErr != nil {
-				return result, executorError("submit", resp.StatusCode, false, true, copyErr)
+				phase := "read"
+				var streamErr *httpforward.StreamError
+				if errors.As(copyErr, &streamErr) {
+					phase = streamErr.Op
+				}
+				return result, executorError(phase, resp.StatusCode, false, false, copyErr)
 			}
 			if written > e.maxResponseBytes(req) {
 				return result, ErrResponseTooLarge
@@ -133,15 +151,15 @@ func (e *HTTPExecutor) ExecuteRaw(ctx context.Context, profile CompiledProfile, 
 		result.RawBody, err = io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
 		_ = resp.Body.Close()
 		if err != nil {
-			return result, err
+			return result, executorError("read", resp.StatusCode, mutatingMethod(op.Submit.Method), false, err)
 		}
 		if int64(len(result.RawBody)) > e.maxResponseBytes(req) {
-			return result, ErrResponseTooLarge
+			return result, executorError("read", resp.StatusCode, mutatingMethod(op.Submit.Method), false, ErrResponseTooLarge)
 		}
 		copyResponseHeaders(w, resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		if _, err := w.Write(result.RawBody); err != nil {
-			return result, executorError("submit", resp.StatusCode, false, true, err)
+			return result, executorError("write", resp.StatusCode, false, false, err)
 		}
 		return result, nil
 	}
@@ -313,7 +331,14 @@ func (e *HTTPExecutor) PollOnce(ctx context.Context, profile CompiledProfile, op
 
 func (e *HTTPExecutor) FetchContent(ctx context.Context, profile CompiledProfile, operation string, req Request) (ContentResult, error) {
 	ctx, cancel := e.withTimeout(ctx)
-	defer cancel()
+	// A successful response transfers timeout ownership with its body. Cancelling
+	// here would interrupt streaming as soon as the headers have arrived.
+	transferred := false
+	defer func() {
+		if !transferred {
+			cancel()
+		}
+	}()
 	op, err := operationFrom(profile, operation)
 	if err != nil {
 		return ContentResult{}, err
@@ -343,7 +368,26 @@ func (e *HTTPExecutor) FetchContent(ctx context.Context, profile CompiledProfile
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
 		return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header}, executorErrorWithResponse("content", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), resp.Header.Get("Retry-After"), false, resp.StatusCode >= 500, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 	}
-	return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: resp.Body}, nil
+	transferred = true
+	return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}}, nil
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.cancel()
+	}
+	return n, err
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.cancel()
+	return b.ReadCloser.Close()
 }
 
 func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Request, body any, encoding string, operationHeaders map[string]string, allowKeyRotation bool, vars map[string]string) (Result, error) {
@@ -588,7 +632,7 @@ func cloneExecutorMap(in map[string]any) map[string]any {
 }
 
 func applyHeaders(req *http.Request, headers map[string]string) {
-	for name, value := range headers {
+	for name, value := range MergeRequestHeaders(headers) {
 		req.Header.Set(name, value)
 	}
 }
@@ -612,11 +656,7 @@ func copyResponseHeaders(dst http.ResponseWriter, src http.Header) {
 	if dst == nil {
 		return
 	}
-	for name, values := range src {
-		for _, value := range values {
-			dst.Header().Add(name, value)
-		}
-	}
+	httpforward.CopyHeaders(dst, src)
 }
 
 func normalizedKeys(keys []string) []string {
@@ -644,16 +684,16 @@ func readJSONResponse(resp *http.Response, maxBytes int64) (Result, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	result := Result{HTTPStatus: resp.StatusCode, Headers: resp.Header.Clone(), RawBody: body}
 	if err != nil {
-		return result, executorError("response", resp.StatusCode, false, false, err)
+		return result, executorError("read", resp.StatusCode, false, false, err)
 	}
 	if int64(len(body)) > maxBytes {
-		return result, fmt.Errorf("%w: %d bytes", ErrResponseTooLarge, len(body))
+		return result, executorError("read", resp.StatusCode, false, false, fmt.Errorf("%w: %d bytes", ErrResponseTooLarge, len(body)))
 	}
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &result.JSON); err != nil && resp.StatusCode < 400 {
 			contentType := resp.Header.Get("Content-Type")
 			retryAfter := resp.Header.Get("Retry-After")
-			return result, executorErrorWithResponse("response", resp.StatusCode, contentType, string(body), retryAfter, false, false, fmt.Errorf("decode JSON response: %w", err))
+			return result, executorErrorWithResponse("read", resp.StatusCode, contentType, string(body), retryAfter, false, false, fmt.Errorf("decode JSON response: %w", err))
 		}
 	}
 	return result, nil

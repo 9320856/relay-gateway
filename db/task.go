@@ -228,7 +228,7 @@ func (TaskRun) TableName() string { return "async_task_runs" }
 type TaskAlias struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	TaskRunID string    `gorm:"size:64;not null;uniqueIndex:idx_task_alias_lookup,priority:1;index" json:"task_run_id"`
-	LookupID  string    `gorm:"size:160;not null;uniqueIndex:idx_task_alias_lookup,priority:2" json:"lookup_id"`
+	LookupID  string    `gorm:"size:160;not null;index:idx_task_alias_lookup_id;uniqueIndex:idx_task_alias_lookup,priority:2" json:"lookup_id"`
 	Source    string    `gorm:"size:16;not null;default:'create'" json:"source"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -273,7 +273,7 @@ type TaskEvent struct {
 func (TaskEvent) TableName() string { return "async_task_events" }
 
 func taskDB(ctx context.Context) (*gorm.DB, error) {
-	db := DBForContext(ctx)
+	db := SQLDBForContext(ctx)
 	if db == nil {
 		return nil, errors.New("database is not initialized")
 	}
@@ -701,9 +701,9 @@ func ClaimDueTaskRunContext(ctx context.Context, owner string, lease time.Durati
 	if err != nil {
 		return nil, err
 	}
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
-		return nil, errors.New("task lease owner is required")
+	owner, err = taskLeaseOwner(owner)
+	if err != nil {
+		return nil, err
 	}
 	if lease <= 0 {
 		lease = 2 * time.Minute
@@ -753,6 +753,10 @@ func ClaimTaskRunPollContext(ctx context.Context, id, owner string, lease time.D
 	id, owner = strings.TrimSpace(id), strings.TrimSpace(owner)
 	if id == "" || owner == "" {
 		return nil, errors.New("task poll lease identity is required")
+	}
+	owner, err = taskLeaseOwner(owner)
+	if err != nil {
+		return nil, err
 	}
 	if lease <= 0 {
 		lease = 2 * time.Minute

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,7 +54,12 @@ func main() {
 		log.Printf("Backfilled legacy task lifecycle mappings: scanned=%d projected=%d already_ready=%d skipped=%d", report.Scanned, report.Projected, report.AlreadyReady, report.Skipped)
 	}
 
-	defer db.Close()
+	databaseCanClose := true
+	defer func() {
+		if databaseCanClose {
+			db.Close()
+		}
+	}()
 
 	if len(os.Args) >= 3 && os.Args[1] == "admin" && os.Args[2] == "reset" {
 		fmt.Print("This removes the administrator and every admin session. Type RESET to continue: ")
@@ -65,7 +71,7 @@ func main() {
 		if err := security.ResetAdmin(); err != nil {
 			log.Fatalf("Reset administrator failed: %v", err)
 		}
-		log.Println("Administrator reset. Open /setup locally to create a new account.")
+		log.Println("Administrator reset. Open /setup to create a new account.")
 		return
 	}
 
@@ -95,6 +101,7 @@ func main() {
 		}
 	}
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	defer stopWorkers()
 	// Sample SQLite size periodically so growth evidence is available without
 	// exposing database contents or credentials through the metrics endpoint.
 	metricsDone := make(chan struct{})
@@ -190,18 +197,6 @@ func main() {
 			}
 		}()
 	}
-	defer func() {
-		stopWorkers()
-		<-metricsDone
-		<-cleanupDone
-		<-taskMappingRecoveryDone
-		<-profilePollerDone
-		<-mediaMaterializerDone
-		<-mediaDeletionDone
-		<-mediaRetentionDone
-		<-mediaReconcileDone
-	}()
-
 	// 3. 预热本地数据库已缓存的模型列表，避免冷启动瞬态空窗
 	service.DefaultDispatcher.LoadCachedModelsFromDB()
 
@@ -223,9 +218,12 @@ func main() {
 	log.Printf("  SQLite 调用日志页面:     http://localhost:%d/logs", port)
 	log.Printf("==========================================================")
 
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           r,
+		BaseContext:       func(net.Listener) context.Context { return requestCtx },
 		ReadTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Long-running streaming responses are bounded at the connection level;
@@ -244,25 +242,18 @@ func main() {
 	// 优雅停机监听系统退出信号 (SIGINT / SIGTERM)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(quit)
 	<-quit
 	log.Println("[Server] Shutting down Relay Gateway server...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[Server] Forced shutdown: %v", err)
-	}
-	stopWorkers()
-	<-metricsDone
-	<-profilePollerDone
-	<-mediaMaterializerDone
-	<-mediaDeletionDone
-	<-mediaRetentionDone
-	<-mediaReconcileDone
-	<-taskMappingRecoveryDone
-	<-cleanupDone
-	if err := service.DefaultDispatcher.StopSync(shutdownCtx); err != nil {
-		log.Printf("[Server] Model sync did not stop cleanly: %v", err)
+	if err := shutdownGateway(srv, cancelRequests, stopWorkers, service.DefaultDispatcher.StopSync, 5*time.Second,
+		metricsDone, cleanupDone, taskMappingRecoveryDone, profilePollerDone,
+		mediaMaterializerDone, mediaDeletionDone, mediaRetentionDone, mediaReconcileDone); err != nil {
+		// A forced exit must not close SQLite underneath a handler or worker
+		// that has not acknowledged cancellation. Process exit releases it.
+		databaseCanClose = false
+		log.Printf("[Server] Shutdown incomplete; exiting without closing active database users: %v", err)
+		return
 	}
 	log.Println("[Server] Relay Gateway exited cleanly.")
 }

@@ -2,8 +2,6 @@ package router
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -17,21 +15,22 @@ import (
 	relaymedia "relay-gateway/media"
 	"relay-gateway/model"
 	"relay-gateway/protocol"
+	"relay-gateway/task"
 )
 
 // materializeProfileVideoURL provides the first required-media end-to-end
 // path. It is intentionally opt-in and synchronous for gateway_wait results;
 // client/background modes continue to use their durable task state until a
 // queued materialization callback is available.
-func materializeProfileVideoURL(c *gin.Context, taskRunID, sourceURL string) (string, error) {
-	return materializeProfileMediaURL(c, taskRunID, "video", 0, sourceURL)
+func materializeProfileVideoURL(c *gin.Context, taskRunID, sourceURL, baseURL string) (string, error) {
+	return materializeProfileMediaURL(c, taskRunID, "video", 0, sourceURL, baseURL)
 }
 
 // materializeProfileMediaURL synchronously creates one logical asset and
 // atomically stores its provider result. It is used only when a required
 // result must be stable before the HTTP response is sent; async/client and
 // background paths use the durable media worker instead.
-func materializeProfileMediaURL(c *gin.Context, taskRunID, kind string, ordinal int, sourceURL string) (string, error) {
+func materializeProfileMediaURL(c *gin.Context, taskRunID, kind string, ordinal int, sourceURL, baseURL string) (string, error) {
 	if c == nil || strings.TrimSpace(sourceURL) == "" {
 		return "", errors.New("profile media source URL is required")
 	}
@@ -51,78 +50,58 @@ func materializeProfileMediaURL(c *gin.Context, taskRunID, kind string, ordinal 
 		return "", err
 	}
 	asset := &db.MediaAsset{PublicID: publicID, CapabilityHash: capabilityHash, CapabilityCiphertext: capabilityCiphertext, TaskRunID: strings.TrimSpace(taskRunID), OriginRequestID: audit.RequestID(c.Request.Context()), Kind: strings.TrimSpace(kind), Ordinal: ordinal, Status: db.MediaAssetPending, SourceKind: source.SourceKind, SourceLocator: source.Locator, ContentType: source.ContentType}
-	if err := db.CreateMediaAssetContext(c.Request.Context(), asset); err != nil {
+	const lease = 5 * time.Minute
+	job, err := db.CreateMediaAssetForMaterializationContext(c.Request.Context(), asset, "profile-sync", lease)
+	if err != nil {
 		return "", err
 	}
-	_ = db.RetryMediaAssetMaterializationContext(c.Request.Context(), asset.ID)
-	job := &db.MediaMaterializationJob{AssetID: asset.ID, Status: db.MediaJobRunning}
-	if err := db.CreateMediaMaterializationJobContext(c.Request.Context(), job); err != nil {
-		_ = db.MarkMediaAssetFailedContext(context.Background(), asset.ID, err.Error())
-		return "", err
+	fail := func(cause error) (string, error) {
+		_ = db.FailMediaMaterializationWithAssetForLeaseContext(context.Background(), job, cause.Error(), time.Now().Add(15*time.Second))
+		return "", cause
 	}
 	store, err := getMediaObjectStore()
 	if err != nil {
-		_ = db.FailMediaMaterializationJobContext(context.Background(), job.ID, err.Error(), time.Time{})
-		_ = db.MarkMediaAssetFailedContext(context.Background(), asset.ID, err.Error())
-		return "", err
+		return fail(err)
 	}
-	fetcher := newProfileMediaSourceFetcher()
+	fetcher := newProfileMediaSourceFetcher(sourceURL, baseURL)
 	if source.SourceKind == relaymedia.SourceBase64 {
 		fetcher = relaymedia.InlineSourceFetcher{}
 	}
-	worker := &relaymedia.MaterializationWorker{Store: store, Fetcher: fetcher}
-	key := relaymedia.ProfileObjectKey(publicID, kind, "")
-	source.MaxBytes = defaultMediaMaxBytes
-	info, err := worker.Materialize(c.Request.Context(), source, key)
-	if err != nil {
-		_ = db.FailMediaMaterializationJobContext(context.Background(), job.ID, err.Error(), time.Time{})
-		_ = db.MarkMediaAssetFailedContext(context.Background(), asset.ID, err.Error())
-		return "", err
+	if _, err := task.MaterializeClaimedMedia(c.Request.Context(), job, asset, store, fetcher, lease); err != nil {
+		return fail(err)
 	}
-	objectID := profileMediaObjectID(info.Key, info.SHA256)
-	if err := ensureProfileMediaObject(c.Request.Context(), objectID, info); err != nil {
-		_ = db.FailMediaMaterializationJobContext(context.Background(), job.ID, err.Error(), time.Time{})
-		_ = db.MarkMediaAssetFailedContext(context.Background(), asset.ID, err.Error())
-		return "", err
-	}
-	if err := db.MarkMediaAssetAvailableContext(c.Request.Context(), asset.ID, objectID, info.ContentType, info.SHA256, info.Size); err != nil {
-		_ = db.FailMediaMaterializationJobContext(context.Background(), job.ID, err.Error(), time.Time{})
-		return "", err
-	}
-	_ = db.CompleteTaskRunAfterMediaContext(c.Request.Context(), taskRunID, kind)
-	_ = db.CompleteMediaMaterializationJobContext(context.Background(), job.ID)
 	return mediaPublicURL(c, publicID, capability), nil
 }
 
 // Keep the synchronous path on the same strict HTTP fetcher as background
 // materialization, while allowing package-level tests to inject a controlled
 // fetch policy for httptest servers.
-var profileMediaFetcherFactory = func() relaymedia.SourceFetcher {
-	return relaymedia.HTTPSourceFetcher{}
+var profileMediaFetcherFactory = func(sourceURL, baseURL string) relaymedia.SourceFetcher {
+	return relaymedia.NewHTTPSourceFetcher(sourceURL, baseURL)
 }
 
-func newProfileMediaSourceFetcher() relaymedia.SourceFetcher {
+func newProfileMediaSourceFetcher(sourceURL, baseURL string) relaymedia.SourceFetcher {
 	if profileMediaFetcherFactory == nil {
-		return relaymedia.HTTPSourceFetcher{}
+		return relaymedia.NewHTTPSourceFetcher(sourceURL, baseURL)
 	}
-	if fetcher := profileMediaFetcherFactory(); fetcher != nil {
+	if fetcher := profileMediaFetcherFactory(sourceURL, baseURL); fetcher != nil {
 		return fetcher
 	}
-	return relaymedia.HTTPSourceFetcher{}
+	return relaymedia.NewHTTPSourceFetcher(sourceURL, baseURL)
 }
 
 // materializeProfileImageResponse replaces every provider URL in an image
 // response with a gateway capability URL. Raw provider payloads are copied
 // and rewritten too, so the response cannot leak a temporary signed URL in an
 // auxiliary field while data[].url appears stable.
-func materializeProfileImageResponse(c *gin.Context, taskRunID string, response map[string]any, sourceURLs []string) error {
+func materializeProfileImageResponse(c *gin.Context, taskRunID, baseURL string, response map[string]any, sourceURLs []string) error {
 	if response == nil || len(sourceURLs) == 0 {
 		return nil
 	}
 	replacements := make(map[string]string, len(sourceURLs))
 	managed := make([]string, 0, len(sourceURLs))
 	for ordinal, sourceURL := range sourceURLs {
-		stableURL, err := materializeProfileMediaURL(c, taskRunID, "image", ordinal, sourceURL)
+		stableURL, err := materializeProfileMediaURL(c, taskRunID, "image", ordinal, sourceURL, baseURL)
 		if err != nil {
 			return err
 		}
@@ -173,32 +152,6 @@ func rewriteProfileMediaValue(value any, replacements map[string]string) any {
 	default:
 		return value
 	}
-}
-
-func profileMediaObjectID(key, checksum string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(key) + "\x00" + strings.TrimSpace(checksum)))
-	return "obj_" + hex.EncodeToString(sum[:])[:60]
-}
-
-func ensureProfileMediaObject(ctx context.Context, objectID string, info relaymedia.ObjectInfo) error {
-	err := db.CreateMediaObjectContext(ctx, &db.MediaObject{
-		ID:          objectID,
-		Backend:     "local",
-		StorageKey:  info.Key,
-		SHA256:      info.SHA256,
-		ByteSize:    info.Size,
-		ContentType: info.ContentType,
-		ETag:        info.SHA256,
-		State:       db.MediaObjectReady,
-	})
-	if err == nil {
-		return nil
-	}
-	existing, getErr := db.GetMediaObjectByIDContext(ctx, objectID)
-	if getErr == nil && existing.StorageKey == info.Key && existing.SHA256 == info.SHA256 && existing.State == db.MediaObjectReady {
-		return nil
-	}
-	return err
 }
 
 func profileMediaRequired() bool { return os.Getenv("RELAY_PROFILE_MEDIA_REQUIRED") == "1" }

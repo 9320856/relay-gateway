@@ -107,7 +107,12 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 		reservationFingerprint := ""
 		unlock := func() {}
 		if op.ExecutionMode == protocol.ExecutionAsync && callerIdempotencyKey != "" {
-			unlock = profileSubmitLocks.acquire(callerIdempotencyKey + "\x00" + binding.Operation)
+			var lockErr error
+			unlock, lockErr = profileSubmitLocks.acquire(c.Request.Context(), callerIdempotencyKey+"\x00"+binding.Operation)
+			if lockErr != nil {
+				return nil, candidate, true, lockErr
+			}
+			defer unlock()
 			existing, lookupErr := db.FindProfileTaskRunByIdempotencyContext(c.Request.Context(), callerIdempotencyKey, binding.Operation, requestFingerprint)
 			if lookupErr == nil {
 				response, responseErr := profileVideoResponseFromTaskRun(existing)
@@ -140,7 +145,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			}
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
-		executor := protocol.NewHTTPExecutor(nil)
+		executor := service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID)
 		request := protocol.Request{BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), Headers: candidate.Headers, Body: body, IdempotencyKey: idempotencyKey}
 		engine := protocol.NewAsyncEngine(executor, executor)
 		run, err := engine.Run(c.Request.Context(), compiled, binding.Operation, request)
@@ -224,7 +229,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 				}
 			}
 			if (profileMediaRequired() || retention == protocol.MediaRetentionRequired) && op.PollingMode == protocol.PollingGatewayWait && strings.TrimSpace(response.VideoURL) != "" {
-				stableURL, materializeErr := materializeProfileVideoURL(c, taskRunID, response.VideoURL)
+				stableURL, materializeErr := materializeProfileVideoURL(c, taskRunID, response.VideoURL, candidate.BaseURL)
 				if materializeErr != nil {
 					response.VideoURL, response.URL, response.Data = "", "", nil
 					response.Status = "materializing"

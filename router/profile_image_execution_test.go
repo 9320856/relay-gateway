@@ -18,7 +18,7 @@ import (
 func allowProfileMediaTestURLs(t *testing.T) {
 	t.Helper()
 	previous := profileMediaFetcherFactory
-	profileMediaFetcherFactory = func() relaymedia.SourceFetcher {
+	profileMediaFetcherFactory = func(string, string) relaymedia.SourceFetcher {
 		return relaymedia.HTTPSourceFetcher{URLValidator: func(string) error { return nil }}
 	}
 	t.Cleanup(func() { profileMediaFetcherFactory = previous })

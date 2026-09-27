@@ -27,6 +27,8 @@ import (
 
 const MaxFieldBytes = 2 << 20
 
+const auditWriteBudget = 5 * time.Second
+
 type contextKey string
 
 const auditContextKey contextKey = "audit_entry"
@@ -39,6 +41,8 @@ type AuditEntry struct {
 	mu                  sync.Mutex
 	row                 db.RequestLogModel
 	conn                *gorm.DB
+	requestContext      context.Context
+	writeBudget         time.Duration
 	sequence            int
 	startErr            error
 	writeErr            error
@@ -116,6 +120,15 @@ func Start(kind, clientIP, method, path string, headers http.Header) (*AuditEntr
 	return startWithDB(db.DB, kind, clientIP, method, path, headers)
 }
 
+// StartContext cancels connection-pool waits at request admission, but keeps
+// final audit persistence independent of a disconnected client's context.
+func StartContext(ctx context.Context, kind, clientIP, method, path string, headers http.Header) (*AuditEntry, error) {
+	entry, err := startWithDB(db.SQLDBForContext(ctx), kind, clientIP, method, path, headers)
+	entry.conn = db.DBForContext(ctx)
+	entry.requestContext = ctx
+	return entry, err
+}
+
 // StartWithDB creates an audit entry on conn. Passing a transaction lets a
 // management mutation commit its business row and its audit row atomically.
 func StartWithDB(conn *gorm.DB, kind, clientIP, method, path string, headers http.Header) (*AuditEntry, error) {
@@ -132,11 +145,13 @@ func startWithDB(conn *gorm.DB, kind, clientIP, method, path string, headers htt
 		entry.startErr = errors.New("database is not initialized")
 		return entry, entry.startErr
 	}
+	conn, cancel := boundedAuditConnection(conn, nil, auditWriteBudget)
+	defer cancel()
 	if err := conn.Create(&entry.row).Error; err != nil {
 		entry.startErr = err
 		return entry, err
 	}
-	if err := entry.addEventLocked("request_received", EventData{Message: method + " " + path}); err != nil {
+	if err := entry.addEventLockedOn(conn, "request_received", EventData{Message: method + " " + path}); err != nil {
 		return entry, err
 	}
 	return entry, nil
@@ -174,7 +189,13 @@ func RequestID(ctx context.Context) string {
 
 func AddEvent(ctx context.Context, phase string, data EventData) {
 	if entry := FromContext(ctx); entry != nil {
-		_ = entry.AddEvent(phase, data)
+		conn, cancel := entry.operationConnection(ctx, false)
+		defer cancel()
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
+		if conn != nil {
+			_ = entry.addEventLockedOn(conn, phase, data)
+		}
 	}
 }
 
@@ -182,9 +203,11 @@ func (e *AuditEntry) AddEvent(phase string, data EventData) error {
 	if e == nil {
 		return nil
 	}
+	conn, cancel := e.operationConnection(nil, false)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.addEventLocked(phase, data)
+	return e.addEventLockedOn(conn, phase, data)
 }
 
 // AddEventWithDB appends an event on conn instead of the entry's default
@@ -196,6 +219,8 @@ func (e *AuditEntry) AddEventWithDB(conn *gorm.DB, phase string, data EventData)
 	if e == nil {
 		return nil
 	}
+	conn, cancel := boundedAuditConnection(conn, nil, e.persistenceBudget())
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if conn == nil {
@@ -204,13 +229,12 @@ func (e *AuditEntry) AddEventWithDB(conn *gorm.DB, phase string, data EventData)
 	return e.addEventLockedOn(conn, phase, data)
 }
 
-func (e *AuditEntry) addEventLocked(phase string, data EventData) error {
-	return e.addEventLockedOn(e.connection(), phase, data)
-}
-
 func (e *AuditEntry) addEventLockedOn(conn *gorm.DB, phase string, data EventData) error {
-	if e.startErr != nil || conn == nil {
+	if e.startErr != nil {
 		return e.startErr
+	}
+	if conn == nil {
+		return errors.New("database is not initialized")
 	}
 	e.sequence++
 	now := time.Now().UTC()
@@ -231,6 +255,40 @@ func (e *AuditEntry) connection() *gorm.DB {
 		return e.conn
 	}
 	return db.DB
+}
+
+// Each logical persistence operation shares one deadline across its SQL calls.
+// Detached completion still uses the original transaction, when present; it
+// must never fall back to the global connection after a canceled transaction.
+func boundedAuditConnection(conn *gorm.DB, ctx context.Context, budget time.Duration) (*gorm.DB, context.CancelFunc) {
+	if conn == nil {
+		return nil, func() {}
+	}
+	if ctx == nil && conn.Statement != nil {
+		ctx = conn.Statement.Context
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	return conn.WithContext(ctx), cancel
+}
+
+func (e *AuditEntry) persistenceBudget() time.Duration {
+	if e.writeBudget > 0 {
+		return e.writeBudget
+	}
+	return auditWriteBudget
+}
+
+func (e *AuditEntry) operationConnection(ctx context.Context, completion bool) (*gorm.DB, context.CancelFunc) {
+	if ctx == nil {
+		ctx = e.requestContext
+	}
+	if completion && e.requestContext != nil {
+		ctx = context.WithoutCancel(e.requestContext)
+	}
+	return boundedAuditConnection(e.connection(), ctx, e.persistenceBudget())
 }
 
 func (e *AuditEntry) setWriteErr(err error) {
@@ -255,15 +313,17 @@ func (e *AuditEntry) SetReqBody(body []byte, modelName string) {
 	if e == nil {
 		return
 	}
+	conn, cancel := e.operationConnection(nil, false)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.row.RequestedModel = strings.TrimSpace(modelName)
 	e.row.IsStream = detectStream(body)
 	e.row.RequestBody, e.row.RequestTruncated = sanitizePayload(body)
-	if conn := e.connection(); e.startErr == nil && conn != nil {
+	if e.startErr == nil && conn != nil {
 		err := conn.Model(&db.RequestLogModel{}).Where("id = ?", e.ID).Updates(map[string]any{"requested_model": e.row.RequestedModel, "is_stream": e.row.IsStream, "request_body": e.row.RequestBody, "request_truncated": e.row.RequestTruncated}).Error
 		e.setWriteErr(err)
-		_ = e.addEventLocked("request_parsed", EventData{Message: "request body parsed", Data: map[string]any{"model": e.row.RequestedModel, "stream": e.row.IsStream}})
+		_ = e.addEventLockedOn(conn, "request_parsed", EventData{Message: "request body parsed", Data: map[string]any{"model": e.row.RequestedModel, "stream": e.row.IsStream}})
 	}
 }
 
@@ -271,17 +331,19 @@ func (e *AuditEntry) RecordDispatch(channelID, channelType, baseURL, targetModel
 	if e == nil {
 		return
 	}
+	conn, cancel := e.operationConnection(nil, false)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.row.ChannelID, e.row.ChannelType, e.row.TargetModel = channelID, channelType, targetModel
-	if conn := e.connection(); conn != nil {
+	if conn != nil {
 		var cm db.ChannelModel
 		if conn.Select("name").First(&cm, "id = ?", channelID).Error == nil {
 			e.row.ChannelName = cm.Name
 		}
 		err := conn.Model(&db.RequestLogModel{}).Where("id = ?", e.ID).Updates(map[string]any{"channel_id": channelID, "channel_name": e.row.ChannelName, "channel_type": channelType, "target_model": targetModel}).Error
 		e.setWriteErr(err)
-		_ = e.addEventLocked("attempt_started", EventData{ChannelID: channelID, TargetURL: baseURL, Message: "dispatching to upstream", Data: map[string]any{"channel_type": channelType, "target_model": targetModel}})
+		_ = e.addEventLockedOn(conn, "attempt_started", EventData{ChannelID: channelID, TargetURL: baseURL, Message: "dispatching to upstream", Data: map[string]any{"channel_type": channelType, "target_model": targetModel}})
 	}
 }
 
@@ -291,25 +353,29 @@ func (e *AuditEntry) RecordCandidates(channelIDs []string) {
 	if e == nil {
 		return
 	}
+	conn, cancel := e.operationConnection(nil, false)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(channelIDs) == 0 || e.startErr != nil || db.DB == nil {
 		return
 	}
-	_ = e.addEventLocked("candidate_channels", EventData{Data: map[string]any{"channel_ids": channelIDs}})
+	_ = e.addEventLockedOn(conn, "candidate_channels", EventData{Data: map[string]any{"channel_ids": channelIDs}})
 }
 
 func (e *AuditEntry) RecordFailover(message string) {
 	if e == nil {
 		return
 	}
+	conn, cancel := e.operationConnection(nil, false)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.row.RetryCount++
-	if conn := e.connection(); conn != nil {
+	if conn != nil {
 		err := conn.Model(&db.RequestLogModel{}).Where("id = ?", e.ID).Update("retry_count", e.row.RetryCount).Error
 		e.setWriteErr(err)
-		_ = e.addEventLocked("failover", EventData{Message: message})
+		_ = e.addEventLockedOn(conn, "failover", EventData{Message: message})
 	}
 }
 
@@ -317,6 +383,8 @@ func (e *AuditEntry) RecordResult(statusCode int, response []byte, resultErr err
 	if e == nil {
 		return
 	}
+	conn, cancel := e.operationConnection(nil, true)
+	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.done {
@@ -339,10 +407,9 @@ func (e *AuditEntry) RecordResult(statusCode int, response []byte, resultErr err
 		e.row.ErrorMessage = sanitizeText(resultErr.Error())
 	}
 	extractUsage(response, &e.row)
-	if conn := e.connection(); e.startErr != nil || conn == nil {
+	if e.startErr != nil || conn == nil {
 		return
 	}
-	conn := e.connection()
 	err := conn.Model(&db.RequestLogModel{}).Where("id = ?", e.ID).Updates(map[string]any{
 		"finished_at": e.row.FinishedAt, "duration_ms": e.row.DurationMs, "status_code": e.row.StatusCode,
 		"response_body": e.row.ResponseBody, "response_truncated": e.row.ResponseTruncated,
@@ -357,7 +424,7 @@ func (e *AuditEntry) RecordResult(statusCode int, response []byte, resultErr err
 	} else if e.row.Outcome != "success" {
 		phase = "request_failed"
 	}
-	_ = e.addEventLocked(phase, EventData{StatusCode: statusCode, Message: e.row.ErrorMessage, Data: map[string]any{"duration_ms": e.row.DurationMs}})
+	_ = e.addEventLockedOn(conn, phase, EventData{StatusCode: statusCode, Message: e.row.ErrorMessage, Data: map[string]any{"duration_ms": e.row.DurationMs}})
 }
 
 // RecordAsyncTaskCreated initializes the asynchronous-task summary on the
@@ -376,10 +443,12 @@ func RecordAsyncTaskCreated(ctx context.Context, taskID, taskKind, initialStatus
 	if taskID == "" || taskKind == "" {
 		return errors.New("async task id and kind are required")
 	}
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
+	conn, cancel := boundedAuditConnection(conn, ctx, entry.persistenceBudget())
+	defer cancel()
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -447,10 +516,12 @@ func RecordAsyncTaskProgress(ctx context.Context, taskID, taskKind, status strin
 	if taskID == "" || taskKind == "" || status == "" {
 		return errors.New("async task id, kind, and status are required")
 	}
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
+	conn, cancel := boundedAuditConnection(conn, ctx, entry.persistenceBudget())
+	defer cancel()
 	resultBody, resultTruncated := sanitizeAsyncTaskResult(response)
 	taskError := ""
 	if resultErr != nil {
@@ -557,7 +628,7 @@ func MarkAsyncTaskPoll(ctx context.Context, taskID, taskKind, status string, res
 	if taskKind == "" {
 		return false
 	}
-	mapping := db.GetTaskMappingForKind(taskID, taskKind)
+	mapping := db.GetTaskMappingForKindContext(ctx, taskID, taskKind)
 	if mapping == nil || strings.TrimSpace(mapping.OriginRequestID) == "" {
 		return false
 	}
@@ -598,6 +669,8 @@ func CoalesceMarkedAsyncTaskPoll(entry *AuditEntry) error {
 	if entry == nil {
 		return nil
 	}
+	conn, cancel := entry.operationConnection(nil, true)
+	defer cancel()
 	entry.mu.Lock()
 	if entry.writeErr != nil {
 		err := entry.writeErr
@@ -619,14 +692,25 @@ func CoalesceMarkedAsyncTaskPoll(entry *AuditEntry) error {
 		entry.mu.Unlock()
 		return nil
 	}
-	if db.DB == nil {
+	if conn == nil {
 		entry.mu.Lock()
 		entry.asyncPollCoalescing = false
 		entry.mu.Unlock()
 		return errors.New("database is not initialized")
 	}
 
-	err := db.DB.Transaction(func(tx *gorm.DB) error {
+	transactionConn := conn
+	if owner := entry.connection(); owner != nil && owner.Statement != nil {
+		if _, nested := owner.Statement.ConnPool.(gorm.TxCommitter); nested {
+			// GORM rolls a nested transaction back with ROLLBACK TO SAVEPOINT.
+			// The business deadline may already have elapsed at that point; use
+			// the transaction owner's context for savepoint cleanup so a caller
+			// that commits its retained child cannot commit partial parent changes.
+			transactionConn = owner
+		}
+	}
+	err := transactionConn.Transaction(func(tx *gorm.DB) error {
+		tx = tx.WithContext(conn.Statement.Context)
 		// Re-read the mapping inside this transaction. A deleted, expired, or
 		// repointed mapping must not cause an unrelated log to be merged.
 		var mapping db.TaskMapping
@@ -1178,16 +1262,21 @@ func extractUsage(body []byte, row *db.RequestLogModel) {
 }
 
 func GetDetail(id string) (*Detail, error) {
-	if db.DB == nil {
+	return GetDetailContext(context.Background(), id)
+}
+
+func GetDetailContext(ctx context.Context, id string) (*Detail, error) {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return nil, errors.New("database is not initialized")
 	}
 	detail := Detail{
 		Events: make([]db.RequestEventModel, 0),
 	}
-	if err := db.DB.First(&detail.Log, "id = ?", id).Error; err != nil {
+	if err := conn.First(&detail.Log, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
-	if err := db.DB.Where("request_id = ?", id).Order("sequence asc").Find(&detail.Events).Error; err != nil {
+	if err := conn.Where("request_id = ?", id).Order("sequence asc").Find(&detail.Events).Error; err != nil {
 		return nil, err
 	}
 
@@ -1197,7 +1286,7 @@ func GetDetail(id string) (*Detail, error) {
 	var run db.TaskRun
 	runErr := gorm.ErrRecordNotFound
 	if strings.TrimSpace(id) != "" {
-		runErr = db.DB.Where("origin_request_id = ?", id).Order("created_at asc, id asc").First(&run).Error
+		runErr = conn.Where("origin_request_id = ?", id).Order("created_at asc, id asc").First(&run).Error
 	}
 	if errors.Is(runErr, gorm.ErrRecordNotFound) && strings.TrimSpace(detail.Log.AsyncTaskID) != "" {
 		lookupIDs := []string{strings.TrimSpace(detail.Log.AsyncTaskID)}
@@ -1208,14 +1297,14 @@ func GetDetail(id string) (*Detail, error) {
 		}
 		for _, lookupID := range lookupIDs {
 			var alias db.TaskAlias
-			aliasErr := db.DB.Where("lookup_id = ?", lookupID).Order("id asc").First(&alias).Error
+			aliasErr := conn.Where("lookup_id = ?", lookupID).Order("id asc").First(&alias).Error
 			if errors.Is(aliasErr, gorm.ErrRecordNotFound) {
 				continue
 			}
 			if aliasErr != nil {
 				return nil, aliasErr
 			}
-			runErr = db.DB.First(&run, "id = ?", alias.TaskRunID).Error
+			runErr = conn.First(&run, "id = ?", alias.TaskRunID).Error
 			break
 		}
 	}
@@ -1225,11 +1314,11 @@ func GetDetail(id string) (*Detail, error) {
 	if runErr == nil {
 		detail.TaskRun = &run
 		detail.Attempts = make([]db.TaskAttempt, 0)
-		if err := db.DB.Where("task_run_id = ?", run.ID).Order("started_at asc, id asc").Find(&detail.Attempts).Error; err != nil {
+		if err := conn.Where("task_run_id = ?", run.ID).Order("started_at asc, id asc").Find(&detail.Attempts).Error; err != nil {
 			return nil, err
 		}
 		detail.TaskEvents = make([]db.TaskEvent, 0)
-		if err := db.DB.Where("task_run_id = ?", run.ID).Order("sequence asc, id asc").Find(&detail.TaskEvents).Error; err != nil {
+		if err := conn.Where("task_run_id = ?", run.ID).Order("sequence asc, id asc").Find(&detail.TaskEvents).Error; err != nil {
 			return nil, err
 		}
 	}
@@ -1238,9 +1327,9 @@ func GetDetail(id string) (*Detail, error) {
 	// request. Async media normally has both links, while historical rows may
 	// have only one, so query both identities in one de-duplicated result set.
 	assets := make([]db.MediaAsset, 0)
-	assetQuery := db.DB.Where("origin_request_id = ?", id)
+	assetQuery := conn.Where("origin_request_id = ?", id)
 	if detail.TaskRun != nil {
-		assetQuery = db.DB.Where("origin_request_id = ? OR task_run_id = ?", id, detail.TaskRun.ID)
+		assetQuery = conn.Where("origin_request_id = ? OR task_run_id = ?", id, detail.TaskRun.ID)
 	}
 	if err := assetQuery.Order("ordinal asc, id asc").Find(&assets).Error; err != nil {
 		return nil, err
@@ -1255,7 +1344,12 @@ func GetDetail(id string) (*Detail, error) {
 }
 
 func List(query ListQuery) ([]db.RequestLogModel, int64, error) {
-	if db.DB == nil {
+	return ListContext(context.Background(), query)
+}
+
+func ListContext(ctx context.Context, query ListQuery) ([]db.RequestLogModel, int64, error) {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return nil, 0, errors.New("database is not initialized")
 	}
 	if query.Page < 1 {
@@ -1282,7 +1376,7 @@ func List(query ListQuery) ([]db.RequestLogModel, int64, error) {
 	if len(query.Search) > 256 {
 		query.Search = query.Search[:256]
 	}
-	q := db.DB.Model(&db.RequestLogModel{})
+	q := conn.Model(&db.RequestLogModel{})
 	if query.Kind != "" {
 		q = q.Where("kind = ?", query.Kind)
 	}
@@ -1322,7 +1416,7 @@ func DeleteAll() error {
 // audit row for the deletion request itself. This lets DELETE /api/logs remain
 // an auditable, atomic admin mutation when called inside the request tx.
 func DeleteAllContext(ctx context.Context, preserveID string) error {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return errors.New("database is not initialized")
 	}
@@ -1338,14 +1432,22 @@ func DeleteAllContext(ctx context.Context, preserveID string) error {
 		}
 		return logs.Delete(&db.RequestLogModel{}).Error
 	}
-	if conn == db.DB {
+	if !db.HasContextTransaction(ctx) {
 		return conn.Transaction(deleteFn)
 	}
 	return deleteFn(conn)
 }
 
 func Cleanup(retentionDays int) error {
-	if db.DB == nil {
+	return CleanupContext(context.Background(), retentionDays)
+}
+
+// CleanupContext releases connection-pool waits when the maintenance worker is
+// stopped. Each batch also has its own write budget and releases its connection
+// before admitting the next batch.
+func CleanupContext(ctx context.Context, retentionDays int) error {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return errors.New("database is not initialized")
 	}
 	if retentionDays < 1 {
@@ -1357,7 +1459,8 @@ func Cleanup(retentionDays int) error {
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	for {
 		batchSize := 0
-		if err := db.DB.Transaction(func(tx *gorm.DB) error {
+		batchConn, cancel := boundedAuditConnection(conn, ctx, auditWriteBudget)
+		err := batchConn.Transaction(func(tx *gorm.DB) error {
 			var ids []string
 			if err := tx.Model(&db.RequestLogModel{}).Where("started_at < ?", cutoff).Order("started_at asc").Limit(500).Pluck("id", &ids).Error; err != nil {
 				return err
@@ -1370,7 +1473,9 @@ func Cleanup(retentionDays int) error {
 				return err
 			}
 			return tx.Where("id IN ?", ids).Delete(&db.RequestLogModel{}).Error
-		}); err != nil {
+		})
+		cancel()
+		if err != nil {
 			return err
 		}
 		if batchSize < 500 {
@@ -1387,11 +1492,21 @@ func StartCleanupWorker(ctx context.Context) <-chan struct{} {
 	go func() {
 		defer close(done)
 		run := func() {
-			days, err := strconv.Atoi(db.GetSetting("audit_retention_days", "30"))
+			conn, cancel := boundedAuditConnection(db.SQLDBForContext(ctx), ctx, auditWriteBudget)
+			var setting db.SettingModel
+			value := "30"
+			if conn != nil && conn.First(&setting, "key = ?", "audit_retention_days").Error == nil {
+				value = setting.Value
+			}
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			days, err := strconv.Atoi(value)
 			if err != nil {
 				days = 30
 			}
-			_ = Cleanup(days)
+			_ = CleanupContext(ctx, days)
 		}
 		run()
 		ticker := time.NewTicker(24 * time.Hour)

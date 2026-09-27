@@ -13,10 +13,7 @@ import (
 	"relay-gateway/security"
 )
 
-// newAuthRequest gives httptest requests an explicit peer address.  The setup
-// endpoint must distinguish a real loopback client from a forwarded or remote
-// address; relying on httptest.NewRequest's default peer would make this
-// important security property untested.
+// newAuthRequest gives initialization and login tests an explicit peer address.
 func newAuthRequest(method, target, body string, remote string) *http.Request {
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.RemoteAddr = remote
@@ -36,7 +33,7 @@ func initAuthTestDB(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 }
 
-func TestAuthSetupLoopbackAndCredentialIsolation(t *testing.T) {
+func TestAuthSetupRemoteAndCredentialIsolation(t *testing.T) {
 	initAuthTestDB(t)
 	engine := Setup()
 
@@ -46,17 +43,11 @@ func TestAuthSetupLoopbackAndCredentialIsolation(t *testing.T) {
 		t.Fatalf("fresh auth status = %d %s", status.Code, status.Body.String())
 	}
 
-	remote := httptest.NewRecorder()
-	engine.ServeHTTP(remote, newAuthRequest(http.MethodPost, "/api/auth/setup", `{"username":"administrator","password":"correct horse battery"}`, "203.0.113.10:1234"))
-	if remote.Code != http.StatusForbidden {
-		t.Fatalf("non-loopback setup returned %d: %s", remote.Code, remote.Body.String())
-	}
-
 	setup := httptest.NewRecorder()
-	setupReq := newAuthRequest(http.MethodPost, "/api/auth/setup", `{"username":"administrator","password":"correct horse battery"}`, "127.0.0.1:4321")
+	setupReq := newAuthRequest(http.MethodPost, "/api/auth/setup", `{"username":"administrator","password":"correct horse battery"}`, "203.0.113.10:4321")
 	engine.ServeHTTP(setup, setupReq)
 	if setup.Code != http.StatusCreated {
-		t.Fatalf("loopback setup returned %d: %s", setup.Code, setup.Body.String())
+		t.Fatalf("remote setup returned %d: %s", setup.Code, setup.Body.String())
 	}
 	var setupPayload struct {
 		CSRF string `json:"csrf_token"`

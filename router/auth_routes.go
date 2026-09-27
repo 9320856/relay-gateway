@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -84,7 +83,7 @@ func corsMiddleware() gin.HandlerFunc {
 }
 
 func handleRootPage(c *gin.Context) {
-	if !security.HasAdmin() {
+	if !security.HasAdminContext(c.Request.Context()) {
 		c.Redirect(http.StatusFound, "/setup")
 		return
 	}
@@ -96,7 +95,7 @@ func handleRootPage(c *gin.Context) {
 }
 
 func handleSetupPage(c *gin.Context) {
-	if security.HasAdmin() {
+	if security.HasAdminContext(c.Request.Context()) {
 		c.Redirect(http.StatusFound, "/dashboard")
 		return
 	}
@@ -104,7 +103,7 @@ func handleSetupPage(c *gin.Context) {
 }
 
 func handleLoginPage(c *gin.Context) {
-	if !security.HasAdmin() {
+	if !security.HasAdminContext(c.Request.Context()) {
 		c.Redirect(http.StatusFound, "/setup")
 		return
 	}
@@ -128,7 +127,7 @@ func handleProfilesPage(c *gin.Context) {
 }
 
 func serveAuthenticatedPage(c *gin.Context, content []byte) {
-	if !security.HasAdmin() {
+	if !security.HasAdminContext(c.Request.Context()) {
 		c.Redirect(http.StatusFound, "/setup")
 		return
 	}
@@ -169,17 +168,6 @@ func trustedForwardedHTTPS(c *gin.Context) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Proto"), ",")[0]), "https")
-}
-
-// trustedForwardedHost mirrors trustedForwardedHTTPS for absolute URLs emitted
-// in API responses. Forwarded host headers are client-controlled unless the
-// process is explicitly configured behind a trusted reverse proxy; using them
-// by default would let an arbitrary caller inject phishing URLs into responses.
-func trustedForwardedHost(c *gin.Context) string {
-	if c == nil || strings.TrimSpace(os.Getenv("RELAY_TRUST_PROXY")) != "1" {
-		return ""
-	}
-	return strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Host"), ",")[0])
 }
 
 func adminSessionMiddleware() gin.HandlerFunc {
@@ -235,7 +223,7 @@ func csrfMiddleware() gin.HandlerFunc {
 func gatewayAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := extractBearerToken(c)
-		if security.ValidateGatewayToken(token) {
+		if security.ValidateGatewayTokenContext(c.Request.Context(), token) {
 			audit.AddEvent(c.Request.Context(), "auth_succeeded", audit.EventData{Message: "gateway token verified"})
 			c.Next()
 			return
@@ -247,12 +235,28 @@ func gatewayAuthMiddleware() gin.HandlerFunc {
 
 func handleAuthStatus(c *gin.Context) {
 	_, err := currentSession(c)
-	c.JSON(http.StatusOK, gin.H{"initialized": security.HasAdmin(), "authenticated": err == nil})
+	initialized := security.HasAdminContext(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{
+		"initialized":           initialized,
+		"authenticated":         err == nil,
+		"setup_secret_required": !initialized && strings.TrimSpace(os.Getenv("RELAY_SETUP_SECRET")) != "",
+	})
 }
 
 func handleSetupAdmin(c *gin.Context) {
+	if security.HasAdminContext(c.Request.Context()) {
+		c.JSON(http.StatusConflict, gin.H{"error": "管理员已初始化，请直接登录"})
+		return
+	}
+	if origin := strings.TrimSpace(c.GetHeader("Origin")); origin != "" {
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !strings.EqualFold(parsed.Host, c.Request.Host) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "跨域初始化请求被拒绝"})
+			return
+		}
+	}
 	if !setupRequestAllowed(c) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "首次初始化只能在本机执行"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "初始化口令缺失或不正确，请输入服务器配置的初始化口令"})
 		return
 	}
 	var input struct {
@@ -270,6 +274,11 @@ func handleSetupAdmin(c *gin.Context) {
 		if errors.Is(err, security.ErrAlreadySetup) {
 			status = http.StatusConflict
 		}
+		if errors.Is(err, security.ErrAuthBusy) {
+			c.Header("Retry-After", "1")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "密码处理繁忙，请稍后重试"})
+			return
+		}
 		c.JSON(status, gin.H{"error": chineseErrorMessage(err, "初始化失败，请检查用户名和密码后重试")})
 		return
 	}
@@ -278,24 +287,18 @@ func handleSetupAdmin(c *gin.Context) {
 }
 
 func setupRequestAllowed(c *gin.Context) bool {
-	// When no proxy is configured, loopback is sufficient for the local-first
-	// setup flow. Once a trusted reverse proxy is enabled, its loopback socket
-	// is not proof that the original request was local, so require the explicit
-	// setup secret as well.
-	if isLoopbackRemote(c.Request.RemoteAddr) && strings.TrimSpace(os.Getenv("RELAY_TRUST_PROXY")) != "1" {
+	// First-time setup works from any address. An operator may protect it with
+	// a preconfigured secret; loopback and proxy requests cannot bypass it.
+	configured := strings.TrimSpace(os.Getenv("RELAY_SETUP_SECRET"))
+	if configured == "" {
 		return true
 	}
-	// A reverse proxy must opt in explicitly. Never trust X-Forwarded-For for
-	// this decision because it is client-controlled unless the proxy is already
-	// proven trustworthy. The secret is compared in constant time and is
-	// intentionally not accepted in a URL.
-	configured := strings.TrimSpace(os.Getenv("RELAY_SETUP_SECRET"))
 	provided := strings.TrimSpace(c.GetHeader("X-Relay-Setup-Secret"))
-	return configured != "" && provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(configured)) == 1
+	return provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(configured)) == 1
 }
 
 func handleLogin(c *gin.Context) {
-	if !security.HasAdmin() {
+	if !security.HasAdminContext(c.Request.Context()) {
 		c.JSON(http.StatusConflict, gin.H{"error": "管理员尚未初始化"})
 		return
 	}
@@ -307,13 +310,25 @@ func handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "登录请求格式不正确"})
 		return
 	}
-	if allowed, retry := security.LoginAllowed(c.Request.RemoteAddr, input.Username); !allowed {
+	attempt, retry := security.BeginLoginAttempt(c.Request.RemoteAddr, input.Username)
+	if attempt == nil {
 		c.Header("Retry-After", security.RetryAfterSeconds(retry))
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "登录失败次数过多，请稍后再试"})
 		return
 	}
-	session, err := security.Login(input.Username, input.Password, c.Request.RemoteAddr, c.GetHeader("User-Agent"))
-	security.RecordLoginResult(c.Request.RemoteAddr, input.Username, err == nil)
+	defer attempt.Cancel()
+	session, err := security.LoginContext(c.Request.Context(), input.Username, input.Password, c.Request.RemoteAddr, c.GetHeader("User-Agent"))
+	if errors.Is(err, security.ErrAuthBusy) {
+		c.Header("Retry-After", "1")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "密码处理繁忙，请稍后重试"})
+		return
+	}
+	if c.Request.Context().Err() != nil {
+		return
+	}
+	if err == nil || errors.Is(err, security.ErrInvalidLogin) {
+		attempt.Finish(err == nil)
+	}
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
 		return
@@ -325,12 +340,12 @@ func handleLogin(c *gin.Context) {
 func handleAuthMe(c *gin.Context) {
 	user := c.MustGet(adminUserContextKey).(db.AdminUserModel)
 	token := c.MustGet(sessionTokenContextKey).(string)
-	csrf, err := security.CSRFToken(token)
+	csrf, err := security.CSRFTokenContext(c.Request.Context(), token)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "登录会话已过期，请重新登录"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"username": user.Username, "csrf_token": csrf, "gateway_token": security.GatewayTokenInfo()})
+	c.JSON(http.StatusOK, gin.H{"username": user.Username, "csrf_token": csrf, "gateway_token": security.GatewayTokenInfoContext(c.Request.Context())})
 }
 
 func handleLogout(c *gin.Context) {
@@ -357,6 +372,15 @@ func handleUpdateCredentials(c *gin.Context) {
 	}
 	session, err := security.UpdateCredentialsContext(c.Request.Context(), user.ID, input.CurrentPassword, input.NewUsername, input.NewPassword, c.Request.RemoteAddr, c.GetHeader("User-Agent"))
 	if err != nil {
+		if errors.Is(err, security.ErrCredentialsChanged) {
+			c.JSON(http.StatusConflict, gin.H{"error": "账号凭据已被其他请求修改，请重新登录后再试"})
+			return
+		}
+		if errors.Is(err, security.ErrAuthBusy) {
+			c.Header("Retry-After", "1")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "密码处理繁忙，请稍后重试"})
+			return
+		}
 		_ = c.Error(err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": chineseErrorMessage(err, "账户信息更新失败，请检查输入后重试")})
 		return
@@ -373,14 +397,4 @@ func handleRotateGatewayToken(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "gateway_api_key": token, "message": "请立即复制此密钥；它不会再次显示。"})
-}
-
-func isLoopbackRemote(remote string) bool {
-	host, _, err := net.SplitHostPort(remote)
-	if err != nil {
-		host = remote
-	}
-	host = strings.Trim(host, "[]")
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

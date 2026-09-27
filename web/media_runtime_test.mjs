@@ -23,7 +23,7 @@ for (const required of [
   'video.removeAttribute("src")',
   "`/api/media-assets/${asset.id}`",
   'method: "DELETE"',
-  "媒体已彻底删除",
+  "删除已提交，媒体链接已失效",
   'media-assets/${encodeURIComponent(asset.id)}/link',
   "正在加载公开链接…",
   "公开链接加载失败，请稍后重试",

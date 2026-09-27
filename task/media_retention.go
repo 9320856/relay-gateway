@@ -36,7 +36,7 @@ func (s *MediaRetentionScanner) Scan(ctx context.Context) (MediaRetentionScanRes
 	if s != nil && s.Page > 0 && s.Page <= 1000 {
 		page = s.Page
 	}
-	g := db.DBForContext(ctx)
+	g := db.SQLDBForContext(ctx)
 	if g == nil {
 		return result, errors.New("database is not initialized")
 	}
@@ -65,7 +65,7 @@ func ScanExpiredMediaAssets(ctx context.Context) (MediaRetentionScanResult, erro
 }
 
 func expireMediaAsset(ctx context.Context, assetID uint, now time.Time) (bool, error) {
-	g := db.DBForContext(ctx)
+	g := db.SQLDBForContext(ctx)
 	expired := false
 	err := g.Transaction(func(tx *gorm.DB) error {
 		var asset db.MediaAsset
@@ -137,7 +137,7 @@ type MediaCapacityStats struct {
 
 func GetMediaCapacityStatsContext(ctx context.Context) (MediaCapacityStats, error) {
 	var out MediaCapacityStats
-	g := db.DBForContext(ctx)
+	g := db.SQLDBForContext(ctx)
 	if g == nil {
 		return out, errors.New("database is not initialized")
 	}

@@ -226,7 +226,7 @@ func TestMediaMaterializationJobLeaseAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	claimed, err = ClaimMediaMaterializationJob("worker-b", time.Minute)
-	if err != nil || claimed.LeaseOwner != "worker-b" || claimed.Attempts != 2 {
+	if err != nil || !strings.HasPrefix(claimed.LeaseOwner, "worker-b:") || claimed.Attempts != 2 {
 		t.Fatalf("retried job = %+v, %v", claimed, err)
 	}
 	if err := CompleteMediaMaterializationJob(job.ID); err != nil {
@@ -490,10 +490,10 @@ func TestMediaDeletionJobLeaseOwnerPreventsStaleCompletion(t *testing.T) {
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("takeover claim = %#v, %v", second, err)
 	}
-	if err := CompleteMediaDeletionJobForLease(first.ID, "worker-a"); !errors.Is(err, ErrMediaJobLeaseOwner) {
+	if err := CompleteMediaDeletionJobForLease(first.ID, first.LeaseOwner); !errors.Is(err, ErrMediaJobLeaseOwner) {
 		t.Fatalf("stale worker completed job: %v", err)
 	}
-	if err := CompleteMediaDeletionJobForLease(second.ID, "worker-b"); err != nil {
+	if err := CompleteMediaDeletionJobForLease(second.ID, second.LeaseOwner); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := GetMediaDeletionJob(100)
@@ -524,10 +524,10 @@ func TestMediaMaterializationJobLeaseOwnerPreventsStaleCompletion(t *testing.T) 
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("takeover claim = %#v, %v", second, err)
 	}
-	if err := CompleteMediaMaterializationJobForLease(first.ID, "worker-a"); !errors.Is(err, ErrMediaJobLeaseOwner) {
+	if err := CompleteMediaMaterializationJobForLease(first.ID, first.LeaseOwner); !errors.Is(err, ErrMediaJobLeaseOwner) {
 		t.Fatalf("stale worker completed job: %v", err)
 	}
-	if err := CompleteMediaMaterializationJobForLease(second.ID, "worker-b"); err != nil {
+	if err := CompleteMediaMaterializationJobForLease(second.ID, second.LeaseOwner); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := GetMediaMaterializationJob(asset.ID)

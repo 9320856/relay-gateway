@@ -13,6 +13,7 @@ import (
 	"relay-gateway/media"
 	"relay-gateway/model"
 	"relay-gateway/protocol"
+	"relay-gateway/service"
 )
 
 // NewProfileBackgroundPoller builds the durable worker used for Profile tasks
@@ -65,7 +66,7 @@ func ProfilePoll(ctx context.Context, run *db.TaskRun) (Observation, error) {
 		return Observation{}, errors.New("profile task provider ID is missing")
 	}
 	upstream := channel.ToUpstreamChannel()
-	executor := protocol.NewHTTPExecutor(nil)
+	executor := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(nil), run.ChannelID)
 	result, err := executor.PollOnce(ctx, compiled, run.Operation, protocol.Request{
 		BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID,
 	})
@@ -81,15 +82,53 @@ func ProfilePoll(ctx context.Context, run *db.TaskRun) (Observation, error) {
 	if strings.EqualFold(strings.TrimSpace(run.TaskKind), "image") {
 		result.ResultURLs = media.NormalizeMediaSources(result.ResultURLs, upstream.BaseURL)
 	}
+	apply := func(write func(context.Context) error) error {
+		if strings.TrimSpace(run.LeaseOwner) != "" {
+			return db.WithTaskRunLeaseContext(ctx, run.ID, run.LeaseOwner, write)
+		}
+		return write(ctx)
+	}
+	// Commit the successful provider payload separately so an enqueue failure
+	// remains recoverable. An enqueue callback must return its actual error;
+	// that fence's whole transaction then rolls back partial media writes.
+	if err := apply(func(writeCtx context.Context) error { return persistProfilePollPayload(writeCtx, run, result) }); err != nil {
+		return Observation{}, err
+	}
+	var observation Observation
+	var projectionErr error
+	err = apply(func(writeCtx context.Context) error {
+		observation, projectionErr = projectProfilePollResult(writeCtx, run, op, result)
+		return projectionErr
+	})
+	if err != nil && projectionErr == nil {
+		return Observation{}, err
+	}
+	if projectionErr != nil && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired {
+		return observation, projectionErr
+	}
+	return observation, nil
+}
+
+func persistProfilePollPayload(ctx context.Context, run *db.TaskRun, result protocol.Result) error {
 	// Persist every successful provider response before projecting lifecycle
 	// state. This makes restart recovery independent of the in-memory poller.
 	if len(result.RawBody) > 0 {
-		_ = db.UpdateTaskRunResultContext(ctx, run.ID, string(result.RawBody), false)
+		if err := db.UpdateTaskRunResultContext(ctx, run.ID, string(result.RawBody), false); err != nil {
+			return err
+		}
 	} else if result.JSON != nil {
-		if encoded, marshalErr := json.Marshal(result.JSON); marshalErr == nil {
-			_ = db.UpdateTaskRunResultContext(ctx, run.ID, string(encoded), false)
+		encoded, marshalErr := json.Marshal(result.JSON)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if err := db.UpdateTaskRunResultContext(ctx, run.ID, string(encoded), false); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func projectProfilePollResult(ctx context.Context, run *db.TaskRun, op protocol.Operation, result protocol.Result) (Observation, error) {
 	status := model.NormalizeTaskStatus(result.Status)
 	observation := Observation{Status: status, HTTPStatus: result.HTTPStatus, Success: true, Outcome: "pending"}
 	if containsFold(op.Poll.SuccessValues, result.Status) {
@@ -114,6 +153,9 @@ func ProfilePoll(ctx context.Context, run *db.TaskRun) (Observation, error) {
 				observation.Success = false
 				observation.Error = fmt.Sprintf("required media materialization enqueue failed: %v", mediaErr)
 				observation.NextPollAt = time.Now().Add(op.Poll.NextDelay(run.PollCount+1, result.Headers.Get("Retry-After"), nil))
+				return observation, mediaErr
+			}
+			if mediaErr != nil {
 				return observation, mediaErr
 			}
 			if mediaErr == nil && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && len(mediaAssets) > 0 {

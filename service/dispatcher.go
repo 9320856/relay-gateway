@@ -345,28 +345,41 @@ func (d *Dispatcher) syncRemoteModelsOnce(ctx context.Context) {
 	syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer syncCancel()
 	channels := d.getActiveChannels()
+	type discovery struct {
+		snapshot   db.ChannelProbeSnapshot
+		generation uint64
+	}
+	jobs := make([]discovery, 0, len(channels))
+	for _, channel := range channels {
+		d.modelsMu.RLock()
+		generation := d.modelGeneration[channel.ID]
+		d.modelsMu.RUnlock()
+		snapshot, err := db.SnapshotChannelProbe(syncCtx, channel)
+		if err == nil && snapshot.Channel.Enabled && snapshot.Channel.FetchModels {
+			jobs = append(jobs, discovery{snapshot, generation})
+		}
+	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConcurrentModelSync)
-	for i := range channels {
-		ch := channels[i]
-		if !ch.FetchModels {
-			continue
+	for _, job := range jobs {
+		select {
+		case sem <- struct{}{}:
+		case <-syncCtx.Done():
+			wg.Wait()
+			return
 		}
-
 		wg.Add(1)
-		go func(channel config.UpstreamChannel) {
+		go func(job discovery) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-syncCtx.Done():
-				return
-			}
+			defer func() { <-sem }()
+			channel, generation := job.snapshot.Channel, job.generation
 			fetchCtx, cancel := context.WithTimeout(syncCtx, 15*time.Second)
 			defer cancel()
-			d.modelsMu.RLock()
-			generation := d.modelGeneration[channel.ID]
-			d.modelsMu.RUnlock()
+			finish, acquireErr := d.beginProfileAttempt(fetchCtx, channel.ID)
+			if acquireErr != nil {
+				return
+			}
+			defer d.releaseHalfOpenProbe(channel.ID)
 
 			start := time.Now()
 			models, err := protocol.DiscoverModels(fetchCtx, channel.BaseURL, channel.GetEffectiveKeys(), channel.Headers, protocol.ProfileModelDefaults(channel.Type))
@@ -377,10 +390,15 @@ func (d *Dispatcher) syncRemoteModelsOnce(ctx context.Context) {
 			if currentGeneration != generation {
 				return
 			}
+			finish(err)
 
 			if err != nil {
 				log.Printf("[Dispatcher] Fetch models from %s (%s) failed: %v", channel.ID, channel.Type, err)
-				db.UpdateChannelHealth(channel.ID, "error", latency, err.Error(), nil)
+				_, _ = db.CommitChannelProbe(syncCtx, job.snapshot, "error", latency, err.Error(), nil)
+				return
+			}
+			committed, commitErr := db.CommitChannelProbe(syncCtx, job.snapshot, "healthy", latency, "", models)
+			if commitErr != nil || !committed {
 				return
 			}
 
@@ -395,9 +413,8 @@ func (d *Dispatcher) syncRemoteModelsOnce(ctx context.Context) {
 			d.remoteModels[channel.ID] = append([]string(nil), models...)
 			d.modelsMu.Unlock()
 
-			db.UpdateChannelHealth(channel.ID, "healthy", latency, "", models)
 			log.Printf("[Dispatcher] Successfully synced %d models from upstream [%s] (%s, %dms)", len(models), channel.ID, channel.Type, latency)
-		}(ch)
+		}(job)
 	}
 	wg.Wait()
 }

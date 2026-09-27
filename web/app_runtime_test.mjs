@@ -779,4 +779,68 @@ assert.equal(channelPicker.value, "profile:custom-profile", "async binding resto
 assert.equal(channelForm.elements.profile_id.value, "custom-profile");
 assert.equal(channelForm.elements.type.value, "newapi", "restoring a profile must retain the credential adapter");
 
+async function setupHarness(status, statusFailure = false) {
+  const setupDocument = new FakeDocument();
+  const form = setupDocument.getElementById("setup-form");
+  const button = new FakeElement("button");
+  form.querySelector = () => button;
+  const field = setupDocument.getElementById("setup-secret-field");
+  field.classList.add("hidden");
+  const secret = setupDocument.getElementById("setup-secret");
+  secret.value = "deployment-secret";
+  secret.disabled = true;
+  const calls = [];
+  const redirects = [];
+  const setupContext = vm.createContext({
+    document: setupDocument,
+    location: { assign: (target) => redirects.push(target) },
+    FormData: class {
+      entries() { return Object.entries({ username: "admin", password: "long-password", confirm_password: "long-password" }); }
+    },
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      if (url === "/api/auth/status") return response(statusFailure ? 503 : 200, statusFailure ? { error: "service unavailable" } : status);
+      return response(200, { csrf_token: "csrf", gateway_api_key: "gateway-key" });
+    },
+  });
+  vm.runInContext(source, setupContext, { filename: "app.js" });
+  await vm.runInContext("initSetup()", setupContext);
+  return { setupDocument, form, button, field, secret, calls, redirects,
+    submit: async () => {
+      for (const handler of form.listeners.get("submit") || []) await handler({ preventDefault() {} });
+    },
+  };
+}
+
+for (const required of [false, true]) {
+  const setup = await setupHarness({ initialized: false, setup_secret_required: required });
+  assert.equal(setup.button.disabled, false);
+  assert.equal(setup.field.classList.contains("hidden"), !required);
+  assert.equal(setup.secret.required, required);
+  assert.equal(setup.secret.disabled, !required);
+  if (required) {
+    setup.secret.value = "";
+    await setup.submit();
+    assert.equal(setup.calls.length, 1, "missing required secret must not submit");
+    assert.match(setup.setupDocument.getElementById("auth-error").textContent, /初始化口令/);
+    setup.secret.value = "deployment-secret";
+  }
+  await setup.submit();
+  const post = setup.calls.find(call => call.url === "/api/auth/setup");
+  assert.ok(post, "setup should submit after status loads");
+  assert.equal(post.options.headers["X-Relay-Setup-Secret"], required ? "deployment-secret" : undefined);
+  assert.deepEqual(JSON.parse(post.options.body), { username: "admin", password: "long-password" });
+  assert.equal(JSON.stringify(post).includes("deployment-secret"), required);
+  assert.equal(setup.secret.value, "", "successful setup clears secret input");
+  assert.equal(setup.setupDocument.getElementById("setup-token").textContent, "gateway-key");
+}
+const failedSetup = await setupHarness({}, true);
+assert.equal(failedSetup.button.disabled, true);
+assert.match(failedSetup.setupDocument.getElementById("auth-error").textContent, /无法读取初始化状态.*service unavailable.*刷新/);
+await failedSetup.submit();
+assert.equal(failedSetup.calls.length, 1, "unknown initialization status must not submit");
+const initializedSetup = await setupHarness({ initialized: true, setup_secret_required: false });
+assert.deepEqual(initializedSetup.redirects, ["/login"]);
+assert.equal(initializedSetup.button.disabled, true);
+
 console.log("app runtime behavior tests passed");

@@ -127,16 +127,90 @@ function bindLogout() {
   if (button) button.addEventListener("click", logout);
 }
 
-function copyText(value) {
-  if (!value) return Promise.reject(new Error("没有可复制的内容"));
-  if (!navigator.clipboard?.writeText) return Promise.reject(new Error("当前浏览器无法访问剪贴板，请使用 localhost 或 HTTPS 地址后重试"));
-  return navigator.clipboard.writeText(value).then(() => toast("已复制到剪贴板"), () => { throw new Error("复制失败，请允许浏览器访问剪贴板后重试"); });
+function copyTextUsingSelection(value) {
+  const previousFocus = document.activeElement;
+  const selection = window.getSelection?.();
+  const ranges = [];
+  for (let i = 0; selection && i < selection.rangeCount; i++) {
+    ranges.push(selection.getRangeAt(i).cloneRange());
+  }
+  const inputSelection = previousFocus && typeof previousFocus.selectionStart === "number"
+    ? [previousFocus.selectionStart, previousFocus.selectionEnd, previousFocus.selectionDirection]
+    : null;
+  const field = document.createElement("textarea");
+  field.value = value;
+  field.readOnly = true;
+  field.setAttribute("tabindex", "-1");
+  field.setAttribute("aria-label", "复制内容");
+  Object.assign(field.style, { position: "fixed", top: "0", left: "0", width: "1px", height: "1px", opacity: "0" });
+  // A modal dialog makes elements outside it inert; keep copying inside it.
+  const container = previousFocus?.closest?.("dialog[open]") || document.querySelector?.("dialog[open]") || document.body;
+  container.append(field);
+  try {
+    field.focus({ preventScroll: true });
+    field.select();
+    field.setSelectionRange(0, value.length);
+    if (document.execCommand?.("copy") !== true) throw new Error("无法复制到剪贴板");
+  } finally {
+    field.remove();
+    previousFocus?.focus?.({ preventScroll: true });
+    if (selection) {
+      selection.removeAllRanges();
+      ranges.forEach((range) => selection.addRange(range));
+    }
+    if (inputSelection) previousFocus.setSelectionRange(...inputSelection);
+  }
+}
+
+async function copyText(value) {
+  if (!value) throw new Error("没有可复制的内容");
+  const text = String(value);
+  try {
+    if (typeof navigator.clipboard?.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        copyTextUsingSelection(text);
+      }
+    } else {
+      copyTextUsingSelection(text);
+    }
+  } catch (_) {
+    throw new Error("复制失败，请手动选择内容复制，或检查浏览器剪贴板权限");
+  }
+  toast("已复制到剪贴板");
+}
+
+function copyTextWithFeedback(value) {
+  return copyText(value).catch((err) => toast(err.message, "error"));
 }
 
 async function initSetup() {
   const form = byId("setup-form");
+  const button = form.querySelector("button[type=submit]");
+  const secretInput = byId("setup-secret");
+  const secretField = byId("setup-secret-field");
+  let statusReady = false;
+  let secretRequired = false;
+  button.disabled = true;
+  try {
+    const status = await request("/api/auth/status");
+    if (status.initialized) {
+      location.assign("/login");
+      return;
+    }
+    secretRequired = status.setup_secret_required === true;
+    secretField.classList.toggle("hidden", !secretRequired);
+    secretInput.required = secretRequired;
+    secretInput.disabled = !secretRequired;
+    statusReady = true;
+    button.disabled = false;
+  } catch (err) {
+    byId("auth-error").textContent = `无法读取初始化状态：${err.message}。请刷新页面重试`;
+  }
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!statusReady) return;
     const data = formObject(form);
     const error = byId("auth-error");
     error.textContent = "";
@@ -144,14 +218,19 @@ async function initSetup() {
       error.textContent = "两次输入的密码不一致";
       return;
     }
-    const button = form.querySelector("button[type=submit]");
+    if (secretRequired && !secretInput.value) {
+      error.textContent = "请输入初始化口令";
+      return;
+    }
     setBusy(button, true);
     try {
       const result = await request("/api/auth/setup", {
         method: "POST",
+        headers: secretRequired ? { "X-Relay-Setup-Secret": secretInput.value } : {},
         body: { username: data.username, password: data.password }
       });
       csrfToken = result.csrf_token;
+      secretInput.value = "";
       byId("setup-token").textContent = result.gateway_api_key;
       byId("setup-copy").dataset.value = result.gateway_api_key;
       byId("setup-step").classList.add("hidden");
@@ -2420,17 +2499,19 @@ function createMediaFigure(url, title, type = "image", options = {}) {
   copyBtn.className = "btn-media-action";
   copyBtn.title = "复制直链到剪贴板";
   copyBtn.textContent = "复制链接";
-  copyBtn.addEventListener("click", () => {
+  copyBtn.addEventListener("click", async () => {
     let resolvedURL = actionURL;
     try {
       resolvedURL = new URL(actionURL, window.location.href).href;
     } catch (_) {}
-    navigator.clipboard.writeText(resolvedURL).then(() => {
+    try {
+      await copyText(resolvedURL);
       copyBtn.textContent = "已复制 ✓";
-      setTimeout(() => { copyBtn.textContent = "复制链接"; }, 2000);
-    }).catch(() => {
+    } catch (err) {
       copyBtn.textContent = "复制失败";
-    });
+      toast(err.message, "error");
+    }
+    setTimeout(() => { copyBtn.textContent = "复制链接"; }, 2000);
   });
   actions.append(copyBtn);
   }
@@ -2545,7 +2626,7 @@ function renderPlaygroundChat(userPrompt, result) {
   copyBtn.textContent = "复制回答";
 
   const contentText = extractChatContent(result.response);
-  copyBtn.addEventListener("click", () => copyText(contentText || ""));
+  copyBtn.addEventListener("click", () => copyTextWithFeedback(contentText || ""));
   aiMeta.append(aiLabel, copyBtn);
 
   const aiBody = document.createElement("div");
@@ -3992,34 +4073,34 @@ function bindLogInspector() {
 
   // Copy buttons
   byId("copy-log-id")?.addEventListener("click", () => {
-    if (activeLogRecord?.id) copyText(activeLogRecord.id);
+    if (activeLogRecord?.id) copyTextWithFeedback(activeLogRecord.id);
   });
   byId("copy-log-curl")?.addEventListener("click", () => {
-    if (activeLogRecord) copyText(generateCurlCommand(activeLogRecord));
+    if (activeLogRecord) copyTextWithFeedback(generateCurlCommand(activeLogRecord));
   });
   byId("copy-visual-prompt")?.addEventListener("click", () => {
     const text = byId("visual-prompt-body")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
   byId("copy-visual-response")?.addEventListener("click", () => {
     const text = byId("visual-response-body")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
   byId("copy-headers-btn")?.addEventListener("click", () => {
     const text = byId("detail-headers")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
   byId("copy-request-btn")?.addEventListener("click", () => {
     const text = byId("detail-request")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
   byId("copy-response-btn")?.addEventListener("click", () => {
     const text = byId("detail-response")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
   byId("copy-stream-btn")?.addEventListener("click", () => {
     const text = byId("detail-stream")?.textContent;
-    if (text) copyText(text);
+    if (text) copyTextWithFeedback(text);
   });
 }
 
@@ -4980,11 +5061,11 @@ async function initMedia() {
     remove.className = "button button-danger-ghost compact-btn";
     remove.textContent = "删除";
     remove.addEventListener("click", async () => {
-      if (!confirm("确定删除此媒体吗？本地文件和数据将被彻底删除。")) return;
+      if (!confirm("确定删除此媒体吗？链接将立即失效，文件随后清理。")) return;
       remove.disabled = true;
       try {
-        await request(`/api/media-assets/${asset.id}`, { method: "DELETE" });
-        toast("媒体已彻底删除");
+        const result = await request(`/api/media-assets/${asset.id}`, { method: "DELETE" });
+        toast(result.status === "deleted" ? "媒体已删除" : "删除已提交，媒体链接已失效");
         await load();
       } catch (err) {
         remove.disabled = false;

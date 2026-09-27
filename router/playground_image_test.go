@@ -200,7 +200,7 @@ func TestMaterializeProfileImageResponseAcceptsDataURL(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/images/generations", nil)
 	dataURL := "data:image/png;base64,iVBORw0KGgo="
 	response := profileImageResponse(protocol.Result{JSON: map[string]any{"data": []any{map[string]any{"url": dataURL}}}, ResultURLs: []string{dataURL}}, false)
-	if err := materializeProfileImageResponse(c, "profile-inline-image-run", response, []string{dataURL}); err != nil {
+	if err := materializeProfileImageResponse(c, "profile-inline-image-run", "", response, []string{dataURL}); err != nil {
 		t.Fatal(err)
 	}
 	data, ok := response["data"].([]map[string]string)

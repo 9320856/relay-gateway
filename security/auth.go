@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -30,11 +29,12 @@ const (
 )
 
 var (
-	ErrNotInitialized = errors.New("administrator is not initialized")
-	ErrAlreadySetup   = errors.New("administrator already exists")
-	ErrInvalidLogin   = errors.New("invalid username or password")
-	ErrInvalidSession = errors.New("invalid or expired session")
-	ErrInvalidCSRF    = errors.New("invalid CSRF token")
+	ErrNotInitialized     = errors.New("administrator is not initialized")
+	ErrAlreadySetup       = errors.New("administrator already exists")
+	ErrInvalidLogin       = errors.New("invalid username or password")
+	ErrInvalidSession     = errors.New("invalid or expired session")
+	ErrInvalidCSRF        = errors.New("invalid CSRF token")
+	ErrCredentialsChanged = errors.New("administrator credentials changed during verification")
 )
 
 type Session struct {
@@ -51,11 +51,16 @@ type TokenInfo struct {
 }
 
 func HasAdmin() bool {
-	if db.DB == nil {
+	return HasAdminContext(context.Background())
+}
+
+func HasAdminContext(ctx context.Context) bool {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return false
 	}
 	var count int64
-	return db.DB.Model(&db.AdminUserModel{}).Count(&count).Error == nil && count > 0
+	return conn.Model(&db.AdminUserModel{}).Count(&count).Error == nil && count > 0
 }
 
 func validateUsername(username string) error {
@@ -151,11 +156,10 @@ func SetupAdmin(username, password, clientIP, userAgent string) (*Session, strin
 	return SetupAdminContext(context.Background(), username, password, clientIP, userAgent)
 }
 
-// SetupAdminContext uses the request transaction when the setup request is
-// wrapped by the audit middleware, keeping the first administrator, gateway
-// token, session, and admin_action record atomic.
+// SetupAdminContext atomically creates the first administrator, gateway token
+// and session. It uses a request transaction if supplied, or opens its own.
 func SetupAdminContext(ctx context.Context, username, password, clientIP, userAgent string) (*Session, string, error) {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return nil, "", errors.New("database is not initialized")
 	}
@@ -166,6 +170,18 @@ func SetupAdminContext(ctx context.Context, username, password, clientIP, userAg
 	if err := validatePassword(password); err != nil {
 		return nil, "", err
 	}
+	var existing int64
+	if err := conn.Model(&db.AdminUserModel{}).Count(&existing).Error; err != nil {
+		return nil, "", err
+	}
+	if existing > 0 {
+		return nil, "", ErrAlreadySetup
+	}
+	release, err := acquirePasswordWork(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
 	passwordHash, err := hashPassword(password)
 	if err != nil {
 		return nil, "", err
@@ -193,7 +209,7 @@ func SetupAdminContext(ctx context.Context, username, password, clientIP, userAg
 		session, err = newSessionRecord(tx, user, clientIP, userAgent)
 		return err
 	}
-	if conn == db.DB {
+	if !db.HasContextTransaction(ctx) {
 		err = conn.Transaction(setupFn)
 	} else {
 		err = setupFn(conn)
@@ -202,14 +218,33 @@ func SetupAdminContext(ctx context.Context, username, password, clientIP, userAg
 }
 
 func Login(username, password, clientIP, userAgent string) (*Session, error) {
-	if db.DB == nil {
+	return LoginContext(context.Background(), username, password, clientIP, userAgent)
+}
+
+func LoginContext(ctx context.Context, username, password, clientIP, userAgent string) (*Session, error) {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return nil, ErrNotInitialized
 	}
-	var user db.AdminUserModel
-	if err := db.DB.First(&user, "username = ?", strings.TrimSpace(username)).Error; err != nil || !verifyPassword(user.PasswordHash, password) {
+	if validateUsername(username) != nil || len(password) > 128 {
 		return nil, ErrInvalidLogin
 	}
-	return newSessionRecord(db.DB, user, clientIP, userAgent)
+	var user db.AdminUserModel
+	if err := conn.First(&user, "username = ?", strings.TrimSpace(username)).Error; err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrInvalidLogin
+	}
+	release, err := acquirePasswordWork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if !verifyPassword(user.PasswordHash, password) {
+		return nil, ErrInvalidLogin
+	}
+	return newSessionRecord(conn, user, clientIP, userAgent)
 }
 
 func ValidateSession(token string) (*Session, error) {
@@ -217,7 +252,7 @@ func ValidateSession(token string) (*Session, error) {
 }
 
 func ValidateSessionContext(ctx context.Context, token string) (*Session, error) {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil || strings.TrimSpace(token) == "" {
 		return nil, ErrInvalidSession
 	}
@@ -247,7 +282,7 @@ func ValidateCSRF(sessionToken, csrfToken string) error {
 }
 
 func ValidateCSRFContext(ctx context.Context, sessionToken, csrfToken string) error {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil || sessionToken == "" || csrfToken == "" {
 		return ErrInvalidCSRF
 	}
@@ -262,13 +297,24 @@ func ValidateCSRFContext(ctx context.Context, sessionToken, csrfToken string) er
 }
 
 func CSRFToken(sessionToken string) (string, error) {
+	return CSRFTokenContext(context.Background(), sessionToken)
+}
+
+func CSRFTokenContext(ctx context.Context, sessionToken string) (string, error) {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
+		return "", ErrInvalidSession
+	}
 	// CSRF values are deliberately not recoverable. Rotate it when /me is called and return the new raw token.
 	csrf, err := randomToken(32)
 	if err != nil {
 		return "", err
 	}
-	result := db.DB.Model(&db.AdminSessionModel{}).Where("token_hash = ?", digest(sessionToken)).Update("csrf_hash", digest(csrf))
-	if result.Error != nil || result.RowsAffected != 1 {
+	result := conn.Model(&db.AdminSessionModel{}).Where("token_hash = ?", digest(sessionToken)).Update("csrf_hash", digest(csrf))
+	if result.Error != nil {
+		return "", result.Error
+	}
+	if result.RowsAffected != 1 {
 		return "", ErrInvalidSession
 	}
 	return csrf, nil
@@ -279,7 +325,7 @@ func Logout(token string) error {
 }
 
 func LogoutContext(ctx context.Context, token string) error {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil || token == "" {
 		return nil
 	}
@@ -291,7 +337,7 @@ func UpdateCredentials(adminID uint, currentPassword, newUsername, newPassword, 
 }
 
 func UpdateCredentialsContext(ctx context.Context, adminID uint, currentPassword, newUsername, newPassword, clientIP, userAgent string) (*Session, error) {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return nil, errors.New("database is not initialized")
 	}
@@ -299,6 +345,14 @@ func UpdateCredentialsContext(ctx context.Context, adminID uint, currentPassword
 	if err := conn.First(&user, adminID).Error; err != nil {
 		return nil, err
 	}
+	if len(currentPassword) > 128 {
+		return nil, ErrInvalidLogin
+	}
+	release, err := acquirePasswordWork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if !verifyPassword(user.PasswordHash, currentPassword) {
 		return nil, ErrInvalidLogin
 	}
@@ -322,11 +376,18 @@ func UpdateCredentialsContext(ctx context.Context, adminID uint, currentPassword
 	}
 	var session *Session
 	updateFn := func(tx *gorm.DB) error {
+		previousVersion := user.SessionVersion
 		user.Username = newUsername
 		user.PasswordHash = newHash
 		user.SessionVersion++
-		if err := tx.Save(&user).Error; err != nil {
-			return err
+		result := tx.Model(&db.AdminUserModel{}).
+			Where("id = ? AND session_version = ?", user.ID, previousVersion).
+			Updates(map[string]any{"username": user.Username, "password_hash": user.PasswordHash, "session_version": user.SessionVersion})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrCredentialsChanged
 		}
 		if err := tx.Where("admin_user_id = ?", user.ID).Delete(&db.AdminSessionModel{}).Error; err != nil {
 			return err
@@ -335,8 +396,7 @@ func UpdateCredentialsContext(ctx context.Context, adminID uint, currentPassword
 		session, err = newSessionRecord(tx, user, clientIP, userAgent)
 		return err
 	}
-	var err error
-	if conn == db.DB {
+	if !db.HasContextTransaction(ctx) {
 		err = conn.Transaction(updateFn)
 	} else {
 		err = updateFn(conn)
@@ -364,7 +424,7 @@ func RotateGatewayToken() (string, error) {
 }
 
 func RotateGatewayTokenContext(ctx context.Context) (string, error) {
-	conn := db.DBForContext(ctx)
+	conn := db.SQLDBForContext(ctx)
 	if conn == nil {
 		return "", errors.New("database is not initialized")
 	}
@@ -377,22 +437,32 @@ func RotateGatewayTokenContext(ctx context.Context) (string, error) {
 }
 
 func ValidateGatewayToken(token string) bool {
-	if db.DB == nil || strings.TrimSpace(token) == "" {
+	return ValidateGatewayTokenContext(context.Background(), token)
+}
+
+func ValidateGatewayTokenContext(ctx context.Context, token string) bool {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil || strings.TrimSpace(token) == "" {
 		return false
 	}
 	var record db.GatewayTokenModel
-	if err := db.DB.First(&record, 1).Error; err != nil {
+	if err := conn.First(&record, 1).Error; err != nil {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(record.TokenHash), []byte(digest(strings.TrimSpace(token)))) == 1
 }
 
 func GatewayTokenInfo() TokenInfo {
-	if db.DB == nil {
+	return GatewayTokenInfoContext(context.Background())
+}
+
+func GatewayTokenInfoContext(ctx context.Context) TokenInfo {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil {
 		return TokenInfo{}
 	}
 	var record db.GatewayTokenModel
-	if err := db.DB.First(&record, 1).Error; err != nil {
+	if err := conn.First(&record, 1).Error; err != nil {
 		return TokenInfo{}
 	}
 	return TokenInfo{Configured: true, Prefix: record.Prefix, UpdatedAt: record.UpdatedAt}
@@ -410,103 +480,6 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
-}
-
-type loginBucket struct {
-	Failures []time.Time
-	LockedTo time.Time
-	LastSeen time.Time
-}
-
-var loginAttempts = struct {
-	sync.Mutex
-	items map[string]*loginBucket
-}{items: make(map[string]*loginBucket)}
-
-func LoginAllowed(clientIP, username string) (bool, time.Duration) {
-	key := loginAttemptKey(clientIP, username)
-	now := time.Now()
-	loginAttempts.Lock()
-	defer loginAttempts.Unlock()
-	b := loginAttempts.items[key]
-	if b == nil {
-		return true, 0
-	}
-	if b.LockedTo.After(now) {
-		return false, time.Until(b.LockedTo)
-	}
-	pruneLoginBucket(b, now)
-	if len(b.Failures) == 0 {
-		delete(loginAttempts.items, key)
-	}
-	return true, 0
-}
-
-func RecordLoginResult(clientIP, username string, success bool) {
-	key := loginAttemptKey(clientIP, username)
-	loginAttempts.Lock()
-	defer loginAttempts.Unlock()
-	if success {
-		delete(loginAttempts.items, key)
-		return
-	}
-	now := time.Now()
-	b := loginAttempts.items[key]
-	if b == nil {
-		if len(loginAttempts.items) >= maxLoginBuckets {
-			pruneLoginAttempts(now)
-			if len(loginAttempts.items) >= maxLoginBuckets {
-				evictOldestLoginBucket()
-			}
-		}
-		b = &loginBucket{}
-		loginAttempts.items[key] = b
-	}
-	pruneLoginBucket(b, now)
-	b.Failures = append(b.Failures, now)
-	b.LastSeen = now
-	if len(b.Failures) >= 5 {
-		b.LockedTo = now.Add(loginFailureWindow)
-	}
-}
-
-func pruneLoginBucket(bucket *loginBucket, now time.Time) {
-	if bucket == nil {
-		return
-	}
-	cutoff := now.Add(-loginFailureWindow)
-	kept := bucket.Failures[:0]
-	for _, at := range bucket.Failures {
-		if at.After(cutoff) {
-			kept = append(kept, at)
-		}
-	}
-	bucket.Failures = kept
-}
-
-// pruneLoginAttempts is only called while the map is at capacity, avoiding an
-// O(n) sweep on each login while ensuring failed-login keys cannot grow without
-// bound in a long-running public deployment.
-func pruneLoginAttempts(now time.Time) {
-	for key, bucket := range loginAttempts.items {
-		pruneLoginBucket(bucket, now)
-		if !bucket.LockedTo.After(now) && len(bucket.Failures) == 0 {
-			delete(loginAttempts.items, key)
-		}
-	}
-}
-
-func evictOldestLoginBucket() {
-	var oldestKey string
-	var oldest time.Time
-	for key, bucket := range loginAttempts.items {
-		if oldestKey == "" || bucket.LastSeen.Before(oldest) {
-			oldestKey, oldest = key, bucket.LastSeen
-		}
-	}
-	if oldestKey != "" {
-		delete(loginAttempts.items, oldestKey)
-	}
 }
 
 func loginAttemptKey(clientIP, username string) string {

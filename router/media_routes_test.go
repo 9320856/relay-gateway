@@ -17,6 +17,7 @@ import (
 )
 
 func TestMediaPublicURLIgnoresUntrustedForwardedHost(t *testing.T) {
+	t.Setenv("RELAY_TRUST_PROXY", "")
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	c.Request.Host = "gateway.example.test"
@@ -31,6 +32,7 @@ func TestMediaPublicURLIgnoresUntrustedForwardedHost(t *testing.T) {
 }
 
 func TestMediaPublicURLTrustsForwardedProtoOnlyForTrustedProxy(t *testing.T) {
+	t.Setenv("RELAY_TRUST_PROXY", "")
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	c.Request.Host = "gateway.example.test"

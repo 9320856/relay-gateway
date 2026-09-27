@@ -192,6 +192,7 @@ func TestMediaMaterializationPollerFetchesProfileContent(t *testing.T) {
 }
 
 func TestDefaultURLFetcherForProfileAssetScopesFakeIPTrust(t *testing.T) {
+	t.Setenv("RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS", "")
 	t.Setenv("RELAY_DB_ENCRYPTION_KEY", "fake-ip-materializer-key")
 	if err := db.InitDB(t.TempDir() + "/fake-ip-materializer.db"); err != nil {
 		t.Fatal(err)
@@ -225,5 +226,20 @@ func TestDefaultURLFetcherForProfileAssetScopesFakeIPTrust(t *testing.T) {
 	legacyFetcher := defaultURLFetcherForAsset(context.Background(), &db.MediaAsset{TaskRunID: legacy.ID, SourceKind: media.SourceURL, SourceLocator: "https://cdn.fanrenapi.com/video.mp4"})
 	if len(legacyFetcher.TrustedFakeIPHosts) != 0 {
 		t.Fatalf("legacy trusted Fake-IP hosts = %#v", legacyFetcher.TrustedFakeIPHosts)
+	}
+}
+
+func TestDefaultURLFetcherForAssetUsesExplicitCDNTrustWithoutTask(t *testing.T) {
+	t.Setenv("RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS", "cdn.provider.net,other.provider.net")
+	fetcher := defaultURLFetcherForAsset(context.Background(), &db.MediaAsset{SourceKind: media.SourceURL, SourceLocator: "https://cdn.provider.net/image.png"})
+	if _, ok := fetcher.TrustedFakeIPHosts["cdn.provider.net"]; !ok || len(fetcher.TrustedFakeIPHosts) != 1 {
+		t.Fatalf("explicit source trust = %#v", fetcher.TrustedFakeIPHosts)
+	}
+	unlisted := defaultURLFetcherForAsset(context.Background(), &db.MediaAsset{SourceKind: media.SourceURL, SourceLocator: "https://unlisted.provider.net/image.png"})
+	if len(unlisted.TrustedFakeIPHosts) != 0 {
+		t.Fatalf("unlisted source trusted = %#v", unlisted.TrustedFakeIPHosts)
+	}
+	if got := defaultURLFetcherForAsset(context.Background(), nil); len(got.TrustedFakeIPHosts) != 0 {
+		t.Fatalf("nil source trusted = %#v", got.TrustedFakeIPHosts)
 	}
 }

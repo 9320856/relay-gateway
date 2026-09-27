@@ -16,8 +16,10 @@ import (
 	"gorm.io/gorm"
 	"relay-gateway/adapter"
 	"relay-gateway/db"
+	"relay-gateway/internal/httpforward"
 	"relay-gateway/media"
 	"relay-gateway/protocol"
+	"relay-gateway/service"
 )
 
 // profileTaskContent serves a Profile-owned video task without consulting the
@@ -86,8 +88,8 @@ func profileTaskContent(c *gin.Context, taskID string) (bool, error) {
 	// following it inside the gateway could forward provider credentials to an
 	// untrusted host.
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	content, err := protocol.NewHTTPExecutor(client).FetchContent(c.Request.Context(), compiled, run.Operation, protocol.Request{
-		BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: headers, TaskID: run.ProviderTaskID,
+	content, err := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(client), upstream.ID).FetchContent(c.Request.Context(), compiled, run.Operation, protocol.Request{
+		BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: protocol.MergeRequestHeaders(upstream.Headers, headers), TaskID: run.ProviderTaskID,
 	})
 	if err != nil {
 		return true, profileContentExecutorError(err)
@@ -154,19 +156,7 @@ func copyProfileContentHeaders(c *gin.Context, headers http.Header) {
 	if c == nil {
 		return
 	}
-	for key, values := range headers {
-		canonical := http.CanonicalHeaderKey(key)
-		switch canonical {
-		case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailers", "Transfer-Encoding", "Upgrade", "Set-Cookie", "Set-Cookie2", "WWW-Authenticate", "Content-Security-Policy", "Content-Security-Policy-Report-Only":
-			continue
-		}
-		if strings.HasPrefix(canonical, "Access-Control-") {
-			continue
-		}
-		for _, value := range values {
-			c.Writer.Header().Add(key, value)
-		}
-	}
+	httpforward.CopyHeaders(c.Writer, headers)
 }
 
 func safeProfileContentRedirect(baseURL, rawLocation string) (string, error) {

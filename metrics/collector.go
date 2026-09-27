@@ -20,6 +20,7 @@ type Collector struct {
 	errors         uint64
 	sqliteBusy     uint64
 	latencies      []time.Duration
+	nextLatency    int
 	maxLatencies   int
 	databaseBytes  int64
 	databaseGrowth int64
@@ -68,8 +69,8 @@ func (c *Collector) ObserveRequest(duration time.Duration, success bool) {
 	}
 	if c.maxLatencies > 0 {
 		if len(c.latencies) == c.maxLatencies {
-			copy(c.latencies, c.latencies[1:])
-			c.latencies[len(c.latencies)-1] = duration
+			c.latencies[c.nextLatency] = duration
+			c.nextLatency = (c.nextLatency + 1) % c.maxLatencies
 		} else {
 			c.latencies = append(c.latencies, duration)
 		}
@@ -131,22 +132,23 @@ type Snapshot struct {
 // latency window.
 func (c *Collector) Snapshot() Snapshot {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	latencies := append([]time.Duration(nil), c.latencies...)
+	snapshot := Snapshot{Requests: c.requests, Successes: c.successes, Errors: c.errors,
+		SQLiteBusy: c.sqliteBusy, LatencySamples: len(latencies), DatabaseBytes: c.databaseBytes,
+		DatabaseGrowthBytes: c.databaseGrowth, DatabaseGrowthRate: c.growthRate,
+		DatabaseSampleAt: c.databaseAt}
+	c.mu.RUnlock()
+	// Percentiles depend on the sample set, not ring order. Sort the private
+	// copy after releasing the reader lock so observers can keep recording.
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	var p95 time.Duration
 	if len(latencies) > 0 {
 		index := (95*len(latencies)+99)/100 - 1
-		p95 = latencies[index]
+		snapshot.P95Latency = latencies[index]
 	}
-	rate := float64(0)
-	if c.requests > 0 {
-		rate = float64(c.errors) / float64(c.requests)
+	if snapshot.Requests > 0 {
+		snapshot.ErrorRate = float64(snapshot.Errors) / float64(snapshot.Requests)
 	}
-	return Snapshot{Requests: c.requests, Successes: c.successes, Errors: c.errors,
-		ErrorRate: rate, SQLiteBusy: c.sqliteBusy, LatencySamples: len(latencies),
-		P95Latency: p95, DatabaseBytes: c.databaseBytes, DatabaseGrowthBytes: c.databaseGrowth,
-		DatabaseGrowthRate: c.growthRate, DatabaseSampleAt: c.databaseAt}
+	return snapshot
 }
 
 // Handler returns a standard-library HTTP handler serving a JSON snapshot.

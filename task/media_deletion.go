@@ -40,6 +40,10 @@ func (p *MediaDeletionPoller) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	ctx, stopLease := keepLeaseAlive(ctx, p.lease(), func(renewCtx context.Context) error {
+		return db.RenewMediaDeletionLeaseContext(renewCtx, job, p.lease())
+	})
+	defer stopLease()
 
 	asset, err := db.GetMediaAssetByIDContext(ctx, job.AssetID)
 	if errors.Is(err, db.ErrMediaAssetNotFound) {
@@ -57,26 +61,17 @@ func (p *MediaDeletionPoller) RunOnce(ctx context.Context) (bool, error) {
 		objectID = strings.TrimSpace(job.ObjectID)
 	}
 	if objectID == "" {
-		if err := db.CompleteMediaAssetDeleteContext(context.Background(), asset.ID); err != nil {
-			return p.fail(job, err)
-		}
 		return p.complete(job)
 	}
 
 	object, err := db.GetMediaObjectByIDContext(ctx, objectID)
 	if errors.Is(err, db.ErrMediaAssetNotFound) {
-		if err := db.CompleteMediaAssetDeleteContext(context.Background(), asset.ID); err != nil {
-			return p.fail(job, err)
-		}
 		return p.complete(job)
 	}
 	if err != nil {
 		return p.fail(job, err)
 	}
 	if object.State == db.MediaObjectDeleted || object.RefCount > 0 {
-		if err := db.CompleteMediaAssetDeleteContext(context.Background(), asset.ID); err != nil {
-			return p.fail(job, err)
-		}
 		return p.complete(job)
 	}
 
@@ -100,16 +95,10 @@ func (p *MediaDeletionPoller) RunOnce(ctx context.Context) (bool, error) {
 			return p.fail(job, err)
 		}
 		if object.State == db.MediaObjectDeleted || object.RefCount > 0 {
-			if err := db.CompleteMediaAssetDeleteContext(context.Background(), asset.ID); err != nil {
-				return p.fail(job, err)
-			}
 			return p.complete(job)
 		}
 	}
 	if err := p.Store.Delete(ctx, key); err != nil && !errors.Is(err, media.ErrNotFound) {
-		return p.fail(job, err)
-	}
-	if err := db.CompleteMediaAssetDeleteContext(context.Background(), asset.ID); err != nil {
 		return p.fail(job, err)
 	}
 	return p.complete(job)
@@ -119,7 +108,9 @@ func (p *MediaDeletionPoller) complete(job *db.MediaDeletionJob) (bool, error) {
 	if job == nil {
 		return true, errors.New("media deletion job is required")
 	}
-	err := db.CompleteMediaDeletionJobForLeaseContext(context.Background(), job.ID, job.LeaseOwner)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.CompleteMediaDeletionJobForLeaseContext(cleanupCtx, job.ID, job.LeaseOwner)
 	if errors.Is(err, db.ErrMediaJobLeaseOwner) {
 		// A newer worker owns the job. Do not let the stale worker report or
 		// overwrite state that belongs to that worker.
@@ -136,14 +127,13 @@ func (p *MediaDeletionPoller) fail(job *db.MediaDeletionJob, cause error) (bool,
 	if job == nil {
 		return true, cause
 	}
-	err := db.FailMediaDeletionJobForLeaseContext(context.Background(), job.ID, job.LeaseOwner, cause.Error(), next)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.FailMediaDeletionJobForLeaseContext(cleanupCtx, job.ID, job.LeaseOwner, cause.Error(), next)
 	if errors.Is(err, db.ErrMediaJobLeaseOwner) {
 		return true, nil
 	}
 	if err != nil {
-		return true, err
-	}
-	if err := db.MarkMediaAssetDeleteFailedContext(context.Background(), job.AssetID, cause.Error(), next); err != nil && !errors.Is(err, db.ErrMediaAssetNotFound) {
 		return true, err
 	}
 	return true, cause

@@ -90,7 +90,7 @@ func profileEngineMultipartDirect(c *gin.Context, operation string, form *multip
 		if entry := audit.FromContext(c.Request.Context()); entry != nil {
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
-		_, execErr := newProfileOperationExecutor(op).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
+		_, execErr := service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
 			BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), Headers: candidate.Headers,
 			RawBody: payload, RawContentType: contentType,
 		}, c.Writer, false)
@@ -312,12 +312,13 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 		if mapped := strings.TrimSpace(candidate.ModelMap[modelName]); mapped != "" {
 			body["model"] = mapped
 		}
-		headers := map[string]string{}
+		forwardedHeaders := make(map[string]string, 2)
 		for _, name := range []string{"anthropic-version", "anthropic-beta"} {
 			if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
-				headers[name] = value
+				forwardedHeaders[name] = value
 			}
 		}
+		headers := protocol.MergeRequestHeaders(candidate.Headers, forwardedHeaders)
 		if entry := audit.FromContext(c.Request.Context()); entry != nil {
 			targetModel := modelName
 			if mapped := strings.TrimSpace(candidate.ModelMap[modelName]); mapped != "" {
@@ -325,7 +326,7 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 			}
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
-		_, err = newProfileOperationExecutor(op).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
+		_, err = service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
 			BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), APIKeyHeader: apiKeyHeader,
 			Headers: headers, Body: body,
 		}, writer, isStreamRequested(rawBody))
@@ -347,6 +348,9 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 }
 
 func profileDirectFailoverEligible(err error) bool {
+	if errors.Is(err, service.ErrChannelUnavailable) {
+		return true
+	}
 	var executorErr *protocol.ExecutorError
 	if !errors.As(err, &executorErr) {
 		return false

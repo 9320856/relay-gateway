@@ -118,24 +118,25 @@ func (MediaMaterializationJob) TableName() string { return "media_materializatio
 // It is intentionally separate from materialization jobs so delete retries can
 // never resubmit or refetch an upstream task.
 type MediaDeletionJob struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	AssetID        uint       `gorm:"not null;uniqueIndex" json:"asset_id"`
-	ObjectID       string     `gorm:"size:64;index" json:"object_id,omitempty"`
-	StorageKey     string     `gorm:"size:512" json:"storage_key,omitempty"`
-	Status         string     `gorm:"size:24;not null;index" json:"status"`
-	LeaseOwner     string     `gorm:"size:128;index" json:"lease_owner,omitempty"`
-	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
-	Attempts       int        `gorm:"not null;default:0" json:"attempts"`
-	NextAttemptAt  *time.Time `gorm:"index" json:"next_attempt_at,omitempty"`
-	LastError      string     `gorm:"size:1024" json:"last_error,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	PurgeAfterDelete bool       `gorm:"not null;default:false" json:"-"`
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	AssetID          uint       `gorm:"not null;uniqueIndex" json:"asset_id"`
+	ObjectID         string     `gorm:"size:64;index" json:"object_id,omitempty"`
+	StorageKey       string     `gorm:"size:512" json:"storage_key,omitempty"`
+	Status           string     `gorm:"size:24;not null;index" json:"status"`
+	LeaseOwner       string     `gorm:"size:128;index" json:"lease_owner,omitempty"`
+	LeaseExpiresAt   *time.Time `json:"lease_expires_at,omitempty"`
+	Attempts         int        `gorm:"not null;default:0" json:"attempts"`
+	NextAttemptAt    *time.Time `gorm:"index" json:"next_attempt_at,omitempty"`
+	LastError        string     `gorm:"size:1024" json:"last_error,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 func (MediaDeletionJob) TableName() string { return "media_deletion_jobs" }
 
 func mediaDB(ctx context.Context) (*gorm.DB, error) {
-	db := DBForContext(ctx)
+	db := SQLDBForContext(ctx)
 	if db == nil {
 		return nil, errors.New("database is not initialized")
 	}
@@ -292,7 +293,7 @@ func RequestMediaAssetDeleteContext(ctx context.Context, publicID, reason string
 		// delete_failed is already a revoked state. Treat retries and repeated
 		// requests as idempotent so the shared object's refcount is decremented
 		// at most once.
-		wasDeleteRequested := asset.Status == MediaAssetDeleteRequested || asset.Status == MediaAssetDeleteFailed
+		wasDeleteRequested := asset.Status == MediaAssetDeleteRequested || asset.Status == MediaAssetDeleteFailed || asset.Status == MediaAssetExpired
 		if !wasDeleteRequested {
 			if err := tx.Model(&asset).Updates(map[string]any{
 				"status":              MediaAssetDeleteRequested,
@@ -379,8 +380,13 @@ func HardDeleteMediaAssetByIDContext(ctx context.Context, id uint) (string, bool
 						return err
 					}
 				} else {
-					if err := tx.Model(&object).Update("ref_count", refCount).Error; err != nil {
-						return err
+					// Revocation already decremented the live reference count. Other
+					// revoked assets can still retain metadata for their cleanup jobs;
+					// counting those rows must not revive a zero-reference object.
+					if asset.Status != MediaAssetDeleted && asset.Status != MediaAssetDeleteRequested && asset.Status != MediaAssetDeleteFailed && asset.Status != MediaAssetExpired {
+						if err := tx.Model(&object).Update("ref_count", gorm.Expr("CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END")).Error; err != nil {
+							return err
+						}
 					}
 				}
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -388,8 +394,12 @@ func HardDeleteMediaAssetByIDContext(ctx context.Context, id uint) (string, bool
 			}
 		}
 
-		_ = tx.Where("asset_id = ?", asset.ID).Delete(&MediaDeletionJob{}).Error
-		_ = tx.Where("asset_id = ?", asset.ID).Delete(&MediaMaterializationJob{}).Error
+		if err := tx.Where("asset_id = ?", asset.ID).Delete(&MediaDeletionJob{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("asset_id = ?", asset.ID).Delete(&MediaMaterializationJob{}).Error; err != nil {
+			return err
+		}
 
 		return tx.Where("id = ?", asset.ID).Delete(&MediaAsset{}).Error
 	})
@@ -637,7 +647,7 @@ func MarkMediaAssetFailedContext(ctx context.Context, assetID uint, failure stri
 	if err != nil {
 		return err
 	}
-	result := db.Model(&MediaAsset{}).Where("id = ? AND status NOT IN ?", assetID, []string{MediaAssetDeleted, MediaAssetDeleteRequested}).Updates(map[string]any{
+	result := db.Model(&MediaAsset{}).Where("id = ? AND status NOT IN ?", assetID, []string{MediaAssetDeleted, MediaAssetDeleteRequested, MediaAssetDeleteFailed, MediaAssetExpired}).Updates(map[string]any{
 		"status": MediaAssetFailed, "delete_reason": strings.TrimSpace(failure), "state_version": gorm.Expr("state_version + 1"), "updated_at": time.Now(),
 	})
 	if result.Error != nil {
@@ -774,15 +784,16 @@ func ClaimMediaDeletionJobContext(ctx context.Context, owner string, lease time.
 	if err != nil {
 		return nil, err
 	}
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
-		return nil, errors.New("media deletion owner is required")
+	owner, err = mediaMaterializationOwner(owner)
+	if err != nil {
+		return nil, err
 	}
 	if lease <= 0 {
 		lease = 5 * time.Minute
 	}
 	now := time.Now()
 	var claimed MediaDeletionJob
+	claimedAttempts := 0
 	err = db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Where("status IN ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", []string{MediaJobPending, MediaJobRunning, MediaJobFailed}, now, now).Order("COALESCE(next_attempt_at, created_at) ASC, id ASC").First(&claimed)
 		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
@@ -791,8 +802,16 @@ func ClaimMediaDeletionJobContext(ctx context.Context, owner string, lease time.
 		if res.Error != nil {
 			return res.Error
 		}
+		claimedAttempts = claimed.Attempts + 1
 		expires := now.Add(lease)
-		return tx.Model(&claimed).Updates(map[string]any{"status": MediaJobRunning, "lease_owner": owner, "lease_expires_at": expires, "attempts": claimed.Attempts + 1, "updated_at": now}).Error
+		result := tx.Model(&claimed).Where("status IN ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", []string{MediaJobPending, MediaJobRunning, MediaJobFailed}, now).Updates(map[string]any{"status": MediaJobRunning, "lease_owner": owner, "lease_expires_at": expires, "attempts": claimed.Attempts + 1, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrMediaJobUnavailable
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -801,7 +820,7 @@ func ClaimMediaDeletionJobContext(ctx context.Context, owner string, lease time.
 	claimed.Status = MediaJobRunning
 	claimed.LeaseOwner = owner
 	claimed.LeaseExpiresAt = &expires
-	claimed.Attempts++
+	claimed.Attempts = claimedAttempts
 	return &claimed, nil
 }
 
@@ -837,14 +856,30 @@ func CompleteMediaDeletionJobForLeaseContext(ctx context.Context, id uint, owner
 	if id == 0 || owner == "" {
 		return errors.New("media deletion lease identity is required")
 	}
-	result := db.Model(&MediaDeletionJob{}).Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?", id, MediaJobRunning, owner, time.Now()).Updates(map[string]any{"status": MediaJobSucceeded, "lease_owner": "", "lease_expires_at": nil, "last_error": "", "updated_at": time.Now()})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrMediaJobLeaseOwner
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		var job MediaDeletionJob
+		if err := tx.First(&job, "id = ?", id).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&MediaDeletionJob{}).Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?", id, MediaJobRunning, owner, time.Now()).Updates(map[string]any{"status": MediaJobSucceeded, "lease_owner": "", "lease_expires_at": nil, "last_error": "", "updated_at": time.Now()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrMediaJobLeaseOwner
+		}
+		txCtx := WithTx(ctx, tx)
+		if err := CompleteMediaAssetDeleteContext(txCtx, job.AssetID); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if job.PurgeAfterDelete {
+			_, _, err := HardDeleteMediaAssetByIDContext(WithTx(ctx, tx), job.AssetID)
+			if err != nil && !errors.Is(err, ErrMediaAssetNotFound) {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func CompleteMediaDeletionJobForLease(id uint, owner string) error {
@@ -892,14 +927,20 @@ func FailMediaDeletionJobForLeaseContext(ctx context.Context, id uint, owner, fa
 		status = MediaJobPending
 		nextAttempt = next
 	}
-	result := db.Model(&MediaDeletionJob{}).Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?", id, MediaJobRunning, owner, time.Now()).Updates(map[string]any{"status": status, "lease_owner": "", "lease_expires_at": nil, "next_attempt_at": nextAttempt, "last_error": strings.TrimSpace(failure), "updated_at": time.Now()})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrMediaJobLeaseOwner
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		var job MediaDeletionJob
+		if err := tx.First(&job, "id = ?", id).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&MediaDeletionJob{}).Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?", id, MediaJobRunning, owner, time.Now()).Updates(map[string]any{"status": status, "lease_owner": "", "lease_expires_at": nil, "next_attempt_at": nextAttempt, "last_error": strings.TrimSpace(failure), "updated_at": time.Now()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrMediaJobLeaseOwner
+		}
+		return MarkMediaAssetDeleteFailedContext(WithTx(ctx, tx), job.AssetID, failure, next)
+	})
 }
 
 func FailMediaDeletionJobForLease(id uint, owner, failure string, next time.Time) error {
@@ -1103,9 +1144,9 @@ func ClaimMediaMaterializationJobContext(ctx context.Context, owner string, leas
 	if err != nil {
 		return nil, err
 	}
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
-		return nil, errors.New("media job lease owner is required")
+	owner, err = mediaMaterializationOwner(owner)
+	if err != nil {
+		return nil, err
 	}
 	if lease <= 0 {
 		lease = 5 * time.Minute
@@ -1124,13 +1165,20 @@ func ClaimMediaMaterializationJobContext(ctx context.Context, owner string, leas
 		}
 		claimedAttempts = claimed.Attempts + 1
 		expires := now.Add(lease)
-		return tx.Model(&claimed).Updates(map[string]any{
+		result = tx.Model(&claimed).Where("status IN ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", []string{MediaJobPending, MediaJobRunning, MediaJobFailed}, now).Updates(map[string]any{
 			"status":           MediaJobRunning,
 			"lease_owner":      owner,
 			"lease_expires_at": expires,
 			"attempts":         claimed.Attempts + 1,
 			"updated_at":       now,
-		}).Error
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrMediaJobUnavailable
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

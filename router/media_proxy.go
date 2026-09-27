@@ -233,7 +233,7 @@ func handleMediaProxy(c *gin.Context) {
 	sess, err := currentSession(c)
 	if err != nil || sess == nil {
 		token := extractBearerToken(c)
-		if token == "" || !security.ValidateGatewayToken(token) {
+		if token == "" || !security.ValidateGatewayTokenContext(c.Request.Context(), token) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未授权访问"})
 			return
 		}

@@ -53,7 +53,7 @@ func ensureDefaultProfileBindings(ctx context.Context, channelType, channelID st
 	}
 	for _, op := range draft.Operations {
 		var existing db.ChannelProtocolBinding
-		lookup := db.DBForContext(ctx).
+		lookup := db.SQLDBForContext(ctx).
 			Where("channel_id = ? AND operation = ? AND model_pattern = ? AND precedence = ?", channelID, op.Operation, "*", -100).
 			First(&existing)
 		if lookup.Error == nil {
@@ -102,7 +102,7 @@ func removeDefaultProfileBindingsForType(ctx context.Context, channelType, chann
 	if profile.Source != db.ProfileSourceBuiltin {
 		return nil
 	}
-	if err := db.DBForContext(ctx).
+	if err := db.SQLDBForContext(ctx).
 		Where("channel_id = ? AND profile_id = ? AND model_pattern = ? AND precedence = ?", channelID, profileID, "*", -100).
 		Delete(&db.ChannelProtocolBinding{}).Error; err != nil {
 		return fmt.Errorf("remove default profile bindings for %q: %w", channelType, err)
@@ -126,7 +126,7 @@ func ReconcileChannelProfileBindings(ctx context.Context, channelID string, prun
 	if channelID == "" {
 		return errors.New("channel_id is required")
 	}
-	database := db.DBForContext(ctx)
+	database := db.SQLDBForContext(ctx)
 	if database == nil {
 		return errors.New("database is not initialized")
 	}
@@ -200,7 +200,7 @@ func ReconcileChannelProfileBindings(ctx context.Context, channelID string, prun
 // ReconcileAllChannelsProfileBindings reconciles all enabled channels that
 // match a supported built-in profile.
 func ReconcileAllChannelsProfileBindings(ctx context.Context, pruneMismatchedDefaults bool) (ReconcileBindingsReport, error) {
-	database := db.DBForContext(ctx)
+	database := db.SQLDBForContext(ctx)
 	if database == nil {
 		return ReconcileBindingsReport{}, errors.New("database is not initialized")
 	}

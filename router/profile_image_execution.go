@@ -159,7 +159,12 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 					return nil, candidate, true, fingerprintErr
 				}
 			}
-			unlock = profileSubmitLocks.acquire(callerIdempotencyKey + "\x00" + binding.Operation)
+			var lockErr error
+			unlock, lockErr = profileSubmitLocks.acquire(c.Request.Context(), callerIdempotencyKey+"\x00"+binding.Operation)
+			if lockErr != nil {
+				return nil, candidate, true, lockErr
+			}
+			defer unlock()
 			existing, lookupErr := db.FindProfileTaskRunByIdempotencyContext(c.Request.Context(), callerIdempotencyKey, binding.Operation, fingerprint)
 			if lookupErr == nil {
 				response, responseErr := profileImageResponseFromTaskRun(existing)
@@ -192,7 +197,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 			}
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
-		executor := newProfileOperationExecutor(op)
+		executor := service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID)
 		request := protocol.Request{BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), Headers: candidate.Headers, Body: body, IdempotencyKey: idempotencyKey}
 		run, err := protocol.NewAsyncEngine(executor, executor).Run(c.Request.Context(), compiled, binding.Operation, request)
 		if err != nil {
@@ -242,7 +247,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 		retention := op.EffectiveMediaRetention()
 		if op.ExecutionMode == protocol.ExecutionDirect && len(result.ResultURLs) > 0 && profileMediaRetentionEnabled(op) && response != nil {
 			taskRunID := profileTaskRunID(candidate.ID, idempotencyKey, binding.Operation)
-			if err := materializeProfileImageResponse(c, taskRunID, response, result.ResultURLs); err != nil && retention == protocol.MediaRetentionRequired {
+			if err := materializeProfileImageResponse(c, taskRunID, candidate.BaseURL, response, result.ResultURLs); err != nil && retention == protocol.MediaRetentionRequired {
 				return nil, candidate, true, fmt.Errorf("profile image media materialization failed: %w", err)
 			}
 		}
@@ -279,7 +284,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 				}
 			}
 			if len(result.ResultURLs) > 0 && profileMediaRetentionEnabled(op) && retention == protocol.MediaRetentionRequired && op.PollingMode == protocol.PollingGatewayWait {
-				if err := materializeProfileImageResponse(c, taskRunID, response, result.ResultURLs); err != nil {
+				if err := materializeProfileImageResponse(c, taskRunID, candidate.BaseURL, response, result.ResultURLs); err != nil {
 					delete(response, "data")
 					delete(response, "raw")
 					delete(response, "raw_payload")

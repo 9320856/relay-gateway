@@ -30,28 +30,35 @@ type profileIdempotencyLocks struct {
 }
 
 type profileIdempotencyLock struct {
-	mu   sync.Mutex
-	refs int
+	semaphore chan struct{}
+	refs      int
 }
 
 var profileSubmitLocks = profileIdempotencyLocks{items: make(map[string]*profileIdempotencyLock)}
 
-func (locks *profileIdempotencyLocks) acquire(key string) func() {
+func (locks *profileIdempotencyLocks) acquire(ctx context.Context, key string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return func() {}
+		return func() {}, nil
 	}
 	locks.mu.Lock()
+	if locks.items == nil {
+		locks.items = make(map[string]*profileIdempotencyLock)
+	}
 	item := locks.items[key]
 	if item == nil {
-		item = &profileIdempotencyLock{}
+		item = &profileIdempotencyLock{semaphore: make(chan struct{}, 1)}
 		locks.items[key] = item
 	}
 	item.refs++
 	locks.mu.Unlock()
-	item.mu.Lock()
-	return func() {
-		item.mu.Unlock()
+	dropReference := func() {
 		locks.mu.Lock()
 		item.refs--
 		if item.refs == 0 {
@@ -59,6 +66,19 @@ func (locks *profileIdempotencyLocks) acquire(key string) func() {
 		}
 		locks.mu.Unlock()
 	}
+	select {
+	case item.semaphore <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-item.semaphore
+			dropReference()
+			return nil, err
+		}
+	case <-ctx.Done():
+		dropReference()
+		return nil, ctx.Err()
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-item.semaphore; dropReference() }) }, nil
 }
 
 func profileCallerIdempotencyKey(c *gin.Context) string {

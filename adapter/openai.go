@@ -18,6 +18,7 @@ import (
 
 	"relay-gateway/audit"
 	"relay-gateway/config"
+	"relay-gateway/internal/httpforward"
 	"relay-gateway/model"
 )
 
@@ -267,15 +268,7 @@ var sensitiveResponseHeaders = map[string]bool{
 
 // copyHeader 标准代理标头透传函数，自动剥离 hop-by-hop 标头与上游 CORS 标头（避免下游浏览器收到重复 CORS 标头导致阻断）
 func copyHeader(dst http.ResponseWriter, src http.Header) {
-	for k, vv := range src {
-		canonicalKey := http.CanonicalHeaderKey(k)
-		if hopByHopHeaders[canonicalKey] || sensitiveResponseHeaders[canonicalKey] || strings.HasPrefix(canonicalKey, "Access-Control-") {
-			continue
-		}
-		for _, v := range vv {
-			dst.Header().Add(k, v)
-		}
-	}
+	httpforward.CopyHeaders(dst, src)
 }
 
 var streamBufPool = sync.Pool{
@@ -287,34 +280,8 @@ var streamBufPool = sync.Pool{
 
 // ForwardStream 使用复用内存缓冲池将流式响应高效推向客户端，大幅减少 GC 开销
 func ForwardStream(ctx context.Context, src io.Reader, dst http.ResponseWriter) error {
-	flusher, ok := dst.(http.Flusher)
-	bufPtr := streamBufPool.Get().(*[]byte)
-	defer streamBufPool.Put(bufPtr)
-	buf := *bufPtr
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		n, rErr := src.Read(buf)
-		if n > 0 {
-			if _, wErr := dst.Write(buf[:n]); wErr != nil {
-				return wErr
-			}
-			if ok {
-				flusher.Flush()
-			}
-		}
-		if rErr != nil {
-			if rErr == io.EOF {
-				return nil
-			}
-			return rErr
-		}
-	}
+	_, err := httpforward.Stream(ctx, src, dst)
+	return err
 }
 
 // CopyWithPool 使用复用缓冲池进行流数据零堆内存拷贝，避免频繁触发 GC

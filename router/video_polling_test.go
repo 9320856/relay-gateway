@@ -330,9 +330,10 @@ func prepareVideoContentRoute(t *testing.T, channel *db.ChannelModel, taskID str
 	return engine
 }
 
-func prepareAuditedStreamingRoute(upstreamURL string) *gin.Engine {
+func prepareAuditedStreamingRoute(upstreamURL string, before ...gin.HandlerFunc) *gin.Engine {
 	engine := gin.New()
 	engine.Use(auditMiddleware())
+	engine.Use(before...)
 	engine.GET("/v1/chat/stream", func(c *gin.Context) {
 		req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstreamURL, nil)
 		if err != nil {
@@ -368,10 +369,10 @@ func TestVideoContentCancellationBeforeHeadersAuditsNoResponse(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(upstream.Close)
-	engine := prepareAuditedStreamingRoute(upstream.URL)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	// Cancel after audit admission, before any upstream request or response.
+	engine := prepareAuditedStreamingRoute(upstream.URL, func(c *gin.Context) { cancel(); c.Next() })
 	request := httptest.NewRequest(http.MethodGet, "http://gateway.test/v1/chat/stream", nil).WithContext(ctx)
 	engine.ServeHTTP(httptest.NewRecorder(), request)
 	if upstreamCalls.Load() != 0 {
@@ -383,6 +384,21 @@ func TestVideoContentCancellationBeforeHeadersAuditsNoResponse(t *testing.T) {
 	}
 	if rows[0].StatusCode != 0 || rows[0].Outcome != "cancelled" || rows[0].ErrorMessage != "" || rows[0].ResponseBody != "" {
 		t.Fatalf("pre-header cancellation audit = %+v", rows[0])
+	}
+}
+
+func TestCanceledBeforeAuditAdmissionDoesNotExecuteOrCreateLog(t *testing.T) {
+	initAsyncTaskRecoveryTestDB(t)
+	called := false
+	engine := gin.New()
+	engine.Use(auditMiddleware())
+	engine.GET("/v1/chat/stream", func(c *gin.Context) { called = true })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/chat/stream", nil).WithContext(ctx))
+	rows, total, err := audit.List(audit.ListQuery{})
+	if called || err != nil || total != 0 || len(rows) != 0 {
+		t.Fatalf("canceled audit admission executed: called=%v total=%d err=%v", called, total, err)
 	}
 }
 

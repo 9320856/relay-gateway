@@ -13,6 +13,8 @@ import (
 	"relay-gateway/db"
 	"relay-gateway/model"
 	"relay-gateway/protocol"
+	"relay-gateway/service"
+	"relay-gateway/task"
 )
 
 func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error) {
@@ -76,27 +78,51 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 		return nil, true, claimErr
 	}
 	run = claimed
-	defer func() { _ = db.ReleaseTaskRunLease(run.ID, "profile-client") }()
+	pollCtx, stopLease := task.KeepTaskRunLeaseAlive(c.Request.Context(), run, 2*time.Minute)
+	defer stopLease()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = db.ReleaseTaskRunLeaseContext(cleanupCtx, run.ID, run.LeaseOwner)
+	}()
 	if budgetReason, exceeded := profileClientPollBudget(run, profileOperationSnapshot(c.Request.Context(), run)); exceeded {
-		_ = db.UpdateTaskRunStatusForLease(run.ID, "profile-client", "expired", "failed")
+		if err := db.UpdateTaskRunStatusForLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, "expired", "failed"); err != nil {
+			return nil, true, err
+		}
 		run.TaskStatus, run.TaskOutcome, run.TaskError = "expired", "failed", budgetReason
 		response := profileDurableStatus(c, run, kind, lookupID)
 		markMappedAsyncTaskPoll(c, lookupID, kind, "expired", response)
 		return response, true, nil
 	}
 	pollStarted := time.Now()
-	result, op, err := profilePollOnce(c.Request.Context(), run)
+	result, op, err := profilePollOnce(pollCtx, run)
 	pollFinished := time.Now()
 	if err != nil {
-		if recordErr := db.RecordTaskPollForLease(run.ID, "profile-client", false, result.HTTPStatus); recordErr == nil {
-			appendProfilePollAttempt(c.Request.Context(), run.ID, pollStarted, pollFinished, result.HTTPStatus, "failed", err.Error())
-			if latest, loadErr := db.GetTaskRunContext(c.Request.Context(), run.ID); loadErr == nil {
+		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		recordErr := db.WithTaskRunLeaseContext(commitCtx, run.ID, run.LeaseOwner, func(txCtx context.Context) error {
+			if recordErr := db.RecordTaskPollForLeaseContext(txCtx, run.ID, run.LeaseOwner, false, result.HTTPStatus); recordErr != nil {
+				return recordErr
+			}
+			if recordErr := db.AppendTaskAttemptContext(txCtx, &db.TaskAttempt{TaskRunID: run.ID, AttemptType: "poll", StartedAt: pollStarted, FinishedAt: &pollFinished, HTTPStatus: result.HTTPStatus, Outcome: "failed", Error: err.Error()}); recordErr != nil {
+				return recordErr
+			}
+			if latest, loadErr := db.GetTaskRunContext(txCtx, run.ID); loadErr == nil {
 				if reason, exceeded := profileClientPollBudget(latest, op); exceeded {
-					if statusErr := db.UpdateTaskRunStatusForLease(run.ID, "profile-client", "expired", "failed"); statusErr == nil {
-						_, _ = db.AppendTaskEvent(c.Request.Context(), run.ID, "budget_exhausted", reason)
+					if statusErr := db.UpdateTaskRunStatusForLeaseContext(txCtx, run.ID, run.LeaseOwner, "expired", "failed"); statusErr != nil {
+						return statusErr
+					}
+					if _, eventErr := db.AppendTaskEvent(txCtx, run.ID, "budget_exhausted", reason); eventErr != nil {
+						return eventErr
 					}
 				}
+			} else {
+				return loadErr
 			}
+			return nil
+		})
+		if recordErr != nil && !errors.Is(recordErr, db.ErrTaskLeaseOwner) {
+			return nil, true, recordErr
 		}
 		return nil, true, err
 	}
@@ -119,38 +145,77 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 	requiredMedia := providerSucceeded && mediaExpected && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
 	var mediaAssets []db.MediaAsset
 	var mediaErr error
-	if outcome == "success" && profileMediaRetentionEnabled(op) {
-		if len(result.ResultURLs) > 0 {
-			mediaAssets, mediaErr = ensureProfileTaskResultMedia(c.Request.Context(), run.ID, run.TaskKind, result.ResultURLs)
-		} else if profileContentMediaEligible(op, run.TaskKind) {
-			mediaAssets, mediaErr = ensureProfileTaskContentMedia(c.Request.Context(), run.ID, run.TaskKind)
+	persistErr := db.WithTaskRunLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, func(txCtx context.Context) error {
+		if len(result.RawBody) > 0 {
+			if err := db.UpdateTaskRunResultContext(txCtx, run.ID, string(result.RawBody), false); err != nil {
+				return err
+			}
+		} else if result.JSON != nil {
+			encoded, encodeErr := json.Marshal(result.JSON)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if err := db.UpdateTaskRunResultContext(txCtx, run.ID, string(encoded), false); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if persistErr == nil && outcome == "success" && profileMediaRetentionEnabled(op) {
+		mediaErr = db.WithTaskRunLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, func(txCtx context.Context) error {
+			var err error
+			if len(result.ResultURLs) > 0 {
+				mediaAssets, err = ensureProfileTaskResultMedia(txCtx, run.ID, run.TaskKind, result.ResultURLs)
+			} else if profileContentMediaEligible(op, run.TaskKind) {
+				mediaAssets, err = ensureProfileTaskContentMedia(txCtx, run.ID, run.TaskKind)
+			}
+			return err
+		})
+		if errors.Is(mediaErr, db.ErrTaskLeaseOwner) {
+			persistErr = mediaErr
 		}
 	}
-	if len(result.RawBody) > 0 {
-		_ = db.UpdateTaskRunResultContext(c.Request.Context(), run.ID, string(result.RawBody), false)
-	} else if result.JSON != nil {
-		if encoded, encodeErr := json.Marshal(result.JSON); encodeErr == nil {
-			_ = db.UpdateTaskRunResultContext(c.Request.Context(), run.ID, string(encoded), false)
-		}
+	if persistErr == nil {
+		persistErr = db.WithTaskRunLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, func(txCtx context.Context) error {
+			// A required-media result is not terminal until every local asset is
+			// available. The provider result is already durable above, so later status
+			// reads can retry local materialization without submitting or polling
+			// upstream again.
+			if requiredMedia && (mediaErr != nil || !profileMediaAssetsAvailable(mediaAssets)) {
+				status, outcome = model.VideoStatusProcessing, "pending"
+				if mediaErr != nil {
+					success = false
+				}
+			}
+			if err := db.RecordTaskPollForLeaseContext(txCtx, run.ID, run.LeaseOwner, success, result.HTTPStatus); err != nil {
+				return err
+			}
+			if err := db.AppendTaskAttemptContext(txCtx, &db.TaskAttempt{TaskRunID: run.ID, AttemptType: "poll", StartedAt: pollStarted, FinishedAt: &pollFinished, HTTPStatus: result.HTTPStatus, Outcome: pollAttemptOutcome(success, outcome), Error: profilePollAttemptError(mediaErr, outcome)}); err != nil {
+				return err
+			}
+			previousStatus := run.TaskStatus
+			if status != "" {
+				if statusErr := db.UpdateTaskRunStatusForLeaseContext(txCtx, run.ID, run.LeaseOwner, status, outcome); statusErr != nil {
+					return statusErr
+				}
+				if !strings.EqualFold(strings.TrimSpace(previousStatus), strings.TrimSpace(status)) {
+					if _, err := db.AppendTaskEvent(txCtx, run.ID, "status_changed", status); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		})
 	}
-	// A required-media result is not terminal until every local asset is
-	// available. The provider result is already durable above, so later status
-	// reads can retry local materialization without submitting or polling
-	// upstream again.
-	if requiredMedia && (mediaErr != nil || !profileMediaAssetsAvailable(mediaAssets)) {
-		status, outcome = model.VideoStatusProcessing, "pending"
-		if mediaErr != nil {
-			success = false
+	if errors.Is(persistErr, db.ErrTaskLeaseOwner) {
+		latest, err := db.GetTaskRunContext(c.Request.Context(), run.ID)
+		if err != nil {
+			return nil, true, err
 		}
+		return profileDurableStatus(c, latest, kind, lookupID), true, nil
 	}
-	if recordErr := db.RecordTaskPollForLease(run.ID, "profile-client", success, result.HTTPStatus); recordErr == nil {
-		appendProfilePollAttempt(c.Request.Context(), run.ID, pollStarted, pollFinished, result.HTTPStatus, pollAttemptOutcome(success, outcome), profilePollAttemptError(mediaErr, outcome))
-	}
-	previousStatus := run.TaskStatus
-	if status != "" {
-		if statusErr := db.UpdateTaskRunStatusForLease(run.ID, "profile-client", status, outcome); statusErr == nil && !strings.EqualFold(strings.TrimSpace(previousStatus), strings.TrimSpace(status)) {
-			_, _ = db.AppendTaskEvent(c.Request.Context(), run.ID, "status_changed", status)
-		}
+	if persistErr != nil {
+		return nil, true, persistErr
 	}
 	if kind == asyncTaskKindImage {
 		response := profileImageResponse(result, true)
@@ -352,13 +417,6 @@ func profileJSONValueString(value any) string {
 	return strings.TrimSpace(text)
 }
 
-func appendProfilePollAttempt(ctx context.Context, taskRunID string, started, finished time.Time, httpStatus int, outcome, attemptError string) {
-	if finished.IsZero() {
-		finished = time.Now()
-	}
-	_ = db.AppendTaskAttemptContext(ctx, &db.TaskAttempt{TaskRunID: taskRunID, AttemptType: "poll", StartedAt: started, FinishedAt: &finished, HTTPStatus: httpStatus, Outcome: outcome, Error: attemptError})
-}
-
 func pollAttemptOutcome(success bool, outcome string) string {
 	if success && outcome == "success" {
 		return "success"
@@ -447,7 +505,7 @@ func profilePollOnce(ctx context.Context, run *db.TaskRun) (protocol.Result, pro
 		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("load channel: %w", err)
 	}
 	upstream := channel.ToUpstreamChannel()
-	result, err := protocol.NewHTTPExecutor(nil).PollOnce(ctx, compiled, run.Operation, protocol.Request{BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID})
+	result, err := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(nil), upstream.ID).PollOnce(ctx, compiled, run.Operation, protocol.Request{BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID})
 	if err == nil && strings.EqualFold(strings.TrimSpace(run.TaskKind), asyncTaskKindImage) {
 		result.ResultURLs = normalizeProfileImageSources(result.ResultURLs, upstream.BaseURL)
 	}

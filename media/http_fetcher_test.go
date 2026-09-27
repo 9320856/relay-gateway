@@ -147,6 +147,7 @@ func TestValidatePublicIP(t *testing.T) {
 		"198.18.0.1", "198.19.255.255", "198.51.100.1",
 		"203.0.113.1", "240.0.0.1", "255.255.255.255",
 		"0.0.0.0", "::", "::1", "fc00::1", "fe80::1",
+		"2001:2::", "2001:2::9d", "2001:2:0:ffff:ffff:ffff:ffff:ffff",
 	}
 	for _, ipStr := range blocked {
 		ip := net.ParseIP(ipStr)
@@ -236,6 +237,12 @@ func TestHTTPSourceFetcherFakeIPPolicyRejectsUnsafeTargets(t *testing.T) {
 			records: map[string][]string{"cdn.fanrenapi.com": {"198.18.1.1", "8.8.8.8"}},
 		},
 		{
+			name:    "mixed public and fake ip reversed",
+			rawURL:  "https://cdn.example.com/video.mp4",
+			trusted: map[string]struct{}{"cdn.example.com": {}},
+			records: map[string][]string{"cdn.example.com": {"8.8.8.8", "198.18.1.1"}},
+		},
+		{
 			name:    "trusted host other private address",
 			rawURL:  "https://cdn.fanrenapi.com/video.mp4",
 			trusted: map[string]struct{}{"cdn.fanrenapi.com": {}},
@@ -256,6 +263,17 @@ func TestHTTPSourceFetcherAllowsNormalPublicTarget(t *testing.T) {
 	fetcher := HTTPSourceFetcher{Resolver: staticResolver(map[string][]string{"media.example.net": {"8.8.8.8", "1.1.1.1"}})}
 	target, err := fetcher.validateURL(context.Background(), "https://media.example.net/video.mp4")
 	if err != nil || len(target.validatedIPs) != 2 {
+		t.Fatalf("validateURL() target=%+v err=%v", target, err)
+	}
+}
+
+func TestHTTPSourceFetcherAllowsNormalPublicTargetWithTrustedHost(t *testing.T) {
+	fetcher := HTTPSourceFetcher{
+		TrustedFakeIPHosts: map[string]struct{}{"cdn.example.com": {}},
+		Resolver:           staticResolver(map[string][]string{"cdn.example.com": {"8.8.8.8", "1.1.1.1"}}),
+	}
+	target, err := fetcher.validateURL(context.Background(), "https://cdn.example.com/image.png")
+	if err != nil || len(target.validatedIPs) != 2 || target.fakeIP {
 		t.Fatalf("validateURL() target=%+v err=%v", target, err)
 	}
 }

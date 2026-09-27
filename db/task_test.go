@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,17 +150,17 @@ func TestTaskLeaseTakeoverRejectsStalePollUpdates(t *testing.T) {
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("takeover = %+v, %v", second, err)
 	}
-	if err := RecordTaskPollForLease(first.ID, "worker-a", true, 200); !errors.Is(err, ErrTaskLeaseOwner) {
+	if err := RecordTaskPollForLease(first.ID, first.LeaseOwner, true, 200); !errors.Is(err, ErrTaskLeaseOwner) {
 		t.Fatalf("stale poll error = %v", err)
 	}
-	if err := UpdateTaskRunStatusForLease(first.ID, "worker-a", "completed", "success"); !errors.Is(err, ErrTaskLeaseOwner) {
+	if err := UpdateTaskRunStatusForLease(first.ID, first.LeaseOwner, "completed", "success"); !errors.Is(err, ErrTaskLeaseOwner) {
 		t.Fatalf("stale status error = %v", err)
 	}
 	loaded, err := GetTaskRun(first.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.PollCount != 0 || loaded.TaskStatus != "queued" || loaded.LeaseOwner != "worker-b" {
+	if loaded.PollCount != 0 || loaded.TaskStatus != "queued" || loaded.LeaseOwner != second.LeaseOwner {
 		t.Fatalf("stale worker mutated task: %+v", loaded)
 	}
 }
@@ -174,17 +175,17 @@ func TestClientPollLeasePreventsConcurrentProviderPolls(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, err := ClaimTaskRunPoll("client-poll-lease-run", "client-a", time.Minute)
-	if err != nil || first.LeaseOwner != "client-a" {
+	if err != nil || !strings.HasPrefix(first.LeaseOwner, "client-a:") {
 		t.Fatalf("first client lease = %+v, %v", first, err)
 	}
 	if _, err := ClaimTaskRunPoll("client-poll-lease-run", "client-b", time.Minute); !errors.Is(err, ErrTaskLeaseUnavailable) {
 		t.Fatalf("concurrent client lease error = %v, want ErrTaskLeaseUnavailable", err)
 	}
-	if err := ReleaseTaskRunLease("client-poll-lease-run", "client-a"); err != nil {
+	if err := ReleaseTaskRunLease("client-poll-lease-run", first.LeaseOwner); err != nil {
 		t.Fatal(err)
 	}
 	second, err := ClaimTaskRunPoll("client-poll-lease-run", "client-b", time.Minute)
-	if err != nil || second.LeaseOwner != "client-b" {
+	if err != nil || !strings.HasPrefix(second.LeaseOwner, "client-b:") {
 		t.Fatalf("released client lease = %+v, %v", second, err)
 	}
 }

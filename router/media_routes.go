@@ -282,15 +282,7 @@ func sanitizeMediaFilename(value string) string {
 }
 
 func mediaPublicURL(c *gin.Context, publicID, capability string) string {
-	scheme := "http"
-	if c.Request.TLS != nil || trustedForwardedHTTPS(c) {
-		scheme = "https"
-	}
-	host := trustedForwardedHost(c)
-	if host == "" {
-		host = c.Request.Host
-	}
-	return fmt.Sprintf("%s://%s/v1/media/%s/%s", scheme, host, url.PathEscape(publicID), url.PathEscape(capability))
+	return resolveAbsoluteURL(c, "/v1/media/"+url.PathEscape(publicID)+"/"+url.PathEscape(capability))
 }
 
 // mediaPublicURLForAsset recovers the fixed capability link for an available
@@ -431,7 +423,7 @@ func handleDeleteMediaAsset(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "媒体资源 ID 无效"})
 		return
 	}
-	storageKey, shouldDeleteFile, err := db.HardDeleteMediaAssetByIDContext(c.Request.Context(), uint(id))
+	status, err := db.RequestMediaAssetPurgeContext(c.Request.Context(), uint(id))
 	if err != nil {
 		if errors.Is(err, db.ErrMediaAssetNotFound) {
 			c.JSON(http.StatusAccepted, gin.H{"status": "deleted", "id": id})
@@ -440,12 +432,7 @@ func handleDeleteMediaAsset(c *gin.Context) {
 		internalError(c, err, "删除媒体资源失败，请稍后重试")
 		return
 	}
-	if shouldDeleteFile && storageKey != "" {
-		if store, storeErr := getMediaObjectStore(); storeErr == nil && store != nil {
-			_ = store.Delete(c.Request.Context(), storageKey)
-		}
-	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "deleted", "id": id})
+	c.JSON(http.StatusAccepted, gin.H{"status": status, "id": id})
 }
 
 func handleRetryMediaAsset(c *gin.Context) {

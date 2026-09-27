@@ -54,10 +54,10 @@ func DiscoverModels(ctx context.Context, baseURL string, apiKeys []string, heade
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxModelDiscoveryResponse+1))
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return nil, executorError("models", resp.StatusCode, false, false, readErr)
+			return nil, executorError("read", resp.StatusCode, false, false, readErr)
 		}
 		if len(body) > maxModelDiscoveryResponse {
-			return nil, ErrResponseTooLarge
+			return nil, executorError("read", resp.StatusCode, false, false, ErrResponseTooLarge)
 		}
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			lastErr = executorError("models", resp.StatusCode, false, true, errors.New("upstream rejected model discovery credentials"))
@@ -73,7 +73,7 @@ func DiscoverModels(ctx context.Context, baseURL string, apiKeys []string, heade
 		}
 		models, parseErr := parseModelList(body)
 		if parseErr != nil {
-			return nil, parseErr
+			return nil, executorError("read", resp.StatusCode, false, false, parseErr)
 		}
 		return models, nil
 	}

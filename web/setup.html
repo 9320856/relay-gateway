@@ -7,7 +7,7 @@
   <meta name="description" content="Relay Gateway 初始化向导">
   <title>系统初始化 · Relay Gateway</title>
   <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
-  <script defer src="/assets/app.js?v=linear-v5"></script>
+  <script defer src="/assets/app.js?v=concurrency-v8"></script>
 </head>
 <body data-page="setup" class="auth-page" translate="no">
   <main class="auth-card">
@@ -17,11 +17,15 @@
     </div>
 
     <div id="setup-step">
-      <p class="eyebrow"><span class="status-dot"></span>LOCAL SETUP</p>
+      <p class="eyebrow"><span class="status-dot"></span>FIRST SETUP</p>
       <h1>创建管理员账号</h1>
-      <p class="muted">首次设置只允许从本机访问。管理员账号用于登录控制台；模型调用客户端将使用专有网关 Key。</p>
+      <p class="muted">首次访问即可创建管理员账号，用于登录控制台；模型调用客户端将使用专有网关 Key。</p>
 
       <form id="setup-form" class="form-stack">
+        <label id="setup-secret-field" class="hidden">初始化口令
+          <input id="setup-secret" type="password" disabled autocomplete="off" placeholder="输入部署者提供的初始化口令">
+          <small class="muted">此服务已启用初始化口令，请向部署者获取。</small>
+        </label>
         <label>用户名
           <input name="username" minlength="3" maxlength="64" required autocomplete="username" autofocus placeholder="设置管理员用户名（3-64位）">
         </label>

@@ -372,7 +372,7 @@ func TestProfileGatewayWaitMediaFailureRemainsRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousFetcher := profileMediaFetcherFactory
-	profileMediaFetcherFactory = func() relaymedia.SourceFetcher {
+	profileMediaFetcherFactory = func(string, string) relaymedia.SourceFetcher {
 		return relaymedia.HTTPSourceFetcher{URLValidator: func(string) error { return errors.New("materialization temporarily unavailable") }}
 	}
 	t.Cleanup(func() { profileMediaFetcherFactory = previousFetcher })

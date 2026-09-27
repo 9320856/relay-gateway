@@ -15,6 +15,7 @@ import (
 	"relay-gateway/db"
 	"relay-gateway/media"
 	"relay-gateway/protocol"
+	"relay-gateway/service"
 )
 
 const defaultMediaMaterializationMaxBytes = int64(512 << 20)
@@ -62,12 +63,6 @@ func (p *MediaMaterializationPoller) RunOnce(ctx context.Context) (bool, error) 
 	if asset.Status == db.MediaAssetAvailable && strings.TrimSpace(asset.ObjectID) != "" {
 		return p.complete(job)
 	}
-	result := media.MediaResult{
-		SourceKind:  asset.SourceKind,
-		Locator:     asset.SourceLocator,
-		ContentType: asset.ContentType,
-		MaxBytes:    defaultMediaMaterializationMaxBytes,
-	}
 	fetcher := p.fetcher()
 	if strings.EqualFold(strings.TrimSpace(asset.SourceKind), media.SourceBase64) {
 		fetcher = media.InlineSourceFetcher{}
@@ -82,22 +77,14 @@ func (p *MediaMaterializationPoller) RunOnce(ctx context.Context) (bool, error) 
 	} else if strings.EqualFold(strings.TrimSpace(asset.SourceKind), media.SourceURL) && p.Fetcher == nil {
 		fetcher = defaultURLFetcherForAsset(ctx, asset)
 	}
-	info, err := (&media.MaterializationWorker{Store: p.Store, Fetcher: fetcher}).Materialize(ctx, result, mediaObjectKey(asset.PublicID, asset.Kind, result.ContentType))
+	_, err = MaterializeClaimedMedia(ctx, job, asset, p.Store, fetcher, p.lease())
 	if err != nil {
-		return p.failWithAsset(job, asset.ID, err)
-	}
-	objectID := mediaObjectID(info.Key, info.SHA256)
-	if err := ensureMediaObject(ctx, objectID, info); err != nil {
-		return p.failWithAsset(job, asset.ID, err)
-	}
-	if err := db.MarkMediaAssetAvailableContext(ctx, asset.ID, objectID, info.ContentType, info.SHA256, info.Size); err != nil {
-		if errors.Is(err, db.ErrMediaAssetGone) {
+		if errors.Is(err, db.ErrMediaAssetGone) || errors.Is(err, db.ErrMediaJobLeaseOwner) {
 			return p.complete(job)
 		}
-		return p.fail(job, err)
+		return p.failWithAsset(job, asset.ID, err)
 	}
-	_ = db.CompleteTaskRunAfterMediaContext(ctx, asset.TaskRunID, asset.Kind)
-	return p.complete(job)
+	return true, nil
 }
 
 // fetchProfileProviderContent opens the immutable Profile Content operation
@@ -148,7 +135,7 @@ func fetchProfileProviderContent(ctx context.Context, taskRunID string) (media.F
 	// inside this worker could forward credentials to an unrelated host.
 	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	upstream := channel.ToUpstreamChannel()
-	content, err := protocol.NewHTTPExecutor(client).FetchContent(ctx, compiled, run.Operation, protocol.Request{
+	content, err := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(client), run.ChannelID).FetchContent(ctx, compiled, run.Operation, protocol.Request{
 		BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID,
 	})
 	if err != nil {
@@ -176,7 +163,9 @@ func (p *MediaMaterializationPoller) complete(job *db.MediaMaterializationJob) (
 	if job == nil {
 		return true, errors.New("media materialization job is required")
 	}
-	err := db.CompleteMediaMaterializationJobForLeaseContext(context.Background(), job.ID, job.LeaseOwner)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.CompleteMediaMaterializationJobForLeaseContext(cleanupCtx, job.ID, job.LeaseOwner)
 	if errors.Is(err, db.ErrMediaJobLeaseOwner) {
 		return true, nil
 	}
@@ -191,7 +180,9 @@ func (p *MediaMaterializationPoller) fail(job *db.MediaMaterializationJob, cause
 	if job == nil {
 		return true, cause
 	}
-	err := db.FailMediaMaterializationJobForLeaseContext(context.Background(), job.ID, job.LeaseOwner, cause.Error(), next)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.FailMediaMaterializationJobForLeaseContext(cleanupCtx, job.ID, job.LeaseOwner, cause.Error(), next)
 	if errors.Is(err, db.ErrMediaJobLeaseOwner) {
 		return true, nil
 	}
@@ -209,15 +200,14 @@ func (p *MediaMaterializationPoller) failWithAsset(job *db.MediaMaterializationJ
 	if job == nil {
 		return true, cause
 	}
-	err := db.FailMediaMaterializationJobForLeaseContext(context.Background(), job.ID, job.LeaseOwner, cause.Error(), next)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.FailMediaMaterializationWithAssetForLeaseContext(cleanupCtx, job, cause.Error(), next)
 	if errors.Is(err, db.ErrMediaJobLeaseOwner) {
 		return true, nil
 	}
 	if err != nil {
 		return true, err
-	}
-	if markErr := db.MarkMediaAssetFailedContext(context.Background(), assetID, cause.Error()); markErr != nil && !errors.Is(markErr, db.ErrMediaAssetGone) {
-		return true, markErr
 	}
 	return true, cause
 }
@@ -268,8 +258,11 @@ func (p *MediaMaterializationPoller) fetcher() media.SourceFetcher {
 }
 
 func defaultURLFetcherForAsset(ctx context.Context, asset *db.MediaAsset) media.HTTPSourceFetcher {
-	fetcher := media.HTTPSourceFetcher{}
-	if asset == nil || strings.TrimSpace(asset.TaskRunID) == "" {
+	if asset == nil {
+		return media.HTTPSourceFetcher{}
+	}
+	fetcher := media.NewHTTPSourceFetcher(asset.SourceLocator, "")
+	if strings.TrimSpace(asset.TaskRunID) == "" {
 		return fetcher
 	}
 	run, err := db.GetTaskRunContext(ctx, asset.TaskRunID)
@@ -280,12 +273,7 @@ func defaultURLFetcherForAsset(ctx context.Context, asset *db.MediaAsset) media.
 	if err != nil {
 		return fetcher
 	}
-	host, ok := media.TrustedFakeIPHost(asset.SourceLocator, channel.BaseURL)
-	if !ok {
-		return fetcher
-	}
-	fetcher.TrustedFakeIPHosts = map[string]struct{}{host: {}}
-	return fetcher
+	return media.NewHTTPSourceFetcher(asset.SourceLocator, channel.BaseURL)
 }
 
 func (p *MediaMaterializationPoller) lease() time.Duration {
@@ -302,25 +290,9 @@ func (p *MediaMaterializationPoller) retryAfter() time.Duration {
 	return 15 * time.Second
 }
 
-func mediaObjectKey(publicID, kind, contentType string) string {
-	return media.ProfileObjectKey(publicID, kind, contentType)
-}
-
 func mediaObjectID(key, checksum string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(key) + "\x00" + strings.TrimSpace(checksum)))
 	return "obj_" + hex.EncodeToString(sum[:])[:60]
-}
-
-func ensureMediaObject(ctx context.Context, objectID string, info media.ObjectInfo) error {
-	err := db.CreateMediaObjectContext(ctx, &db.MediaObject{ID: objectID, Backend: "local", StorageKey: info.Key, SHA256: info.SHA256, ByteSize: info.Size, ContentType: info.ContentType, ETag: info.SHA256, State: db.MediaObjectReady})
-	if err == nil {
-		return nil
-	}
-	existing, getErr := db.GetMediaObjectByIDContext(ctx, objectID)
-	if getErr == nil && existing.StorageKey == info.Key && existing.SHA256 == info.SHA256 && existing.State == db.MediaObjectReady {
-		return nil
-	}
-	return fmt.Errorf("persist media object: %w", err)
 }
 
 func (p *MediaMaterializationPoller) String() string {

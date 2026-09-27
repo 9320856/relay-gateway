@@ -38,6 +38,9 @@ func (p *BackgroundPoller) RunOnce(ctx context.Context) (bool, error) {
 	if p == nil || p.Poll == nil {
 		return false, errors.New("background poll function is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	owner := strings.TrimSpace(p.Owner)
 	if owner == "" {
 		return false, errors.New("background poll owner is required")
@@ -49,48 +52,63 @@ func (p *BackgroundPoller) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	owner = run.LeaseOwner
+	workCtx, stopLease := KeepTaskRunLeaseAlive(ctx, run, p.lease())
+	defer stopLease()
 	started := time.Now()
-	observation, pollErr := p.Poll(ctx, run)
+	observation, pollErr := p.Poll(workCtx, run)
 	finished := time.Now()
+	if renewalErr := stopLease(); renewalErr != nil && ctx.Err() == nil {
+		if errors.Is(renewalErr, db.ErrTaskLeaseOwner) {
+			return true, nil
+		}
+		return true, renewalErr
+	}
 	if pollErr != nil {
 		observation.Success = false
 		if observation.Error == "" {
 			observation.Error = pollErr.Error()
 		}
 	}
-	if !observation.SkipPollAccounting {
-		if err := db.RecordTaskPollForLease(run.ID, owner, observation.Success, observation.HTTPStatus); err != nil {
-			if errors.Is(err, db.ErrTaskLeaseOwner) {
-				return true, nil
+	// A shutdown still records and releases the in-flight poll, but this
+	// durable cleanup has a bound and cannot wait forever for SQLite's pool.
+	commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = db.WithTaskRunLeaseContext(commitCtx, run.ID, owner, func(txCtx context.Context) error {
+		if !observation.SkipPollAccounting {
+			if err := db.RecordTaskPollForLeaseContext(txCtx, run.ID, owner, observation.Success, observation.HTTPStatus); err != nil {
+				return err
 			}
-			return true, err
+			if err := db.AppendTaskAttemptContext(txCtx, &db.TaskAttempt{TaskRunID: run.ID, AttemptType: "poll", StartedAt: started, FinishedAt: &finished, HTTPStatus: observation.HTTPStatus, Outcome: pollOutcome(observation), Error: observation.Error}); err != nil {
+				return err
+			}
 		}
-		_ = db.AppendTaskAttempt(&db.TaskAttempt{TaskRunID: run.ID, AttemptType: "poll", StartedAt: started, FinishedAt: &finished, HTTPStatus: observation.HTTPStatus, Outcome: pollOutcome(observation), Error: observation.Error})
-	}
-	if strings.TrimSpace(observation.Status) != "" {
-		if err := db.UpdateTaskRunStatusForLease(run.ID, owner, observation.Status, observation.Outcome); err == nil {
-			_, _ = db.AppendTaskEvent(context.Background(), run.ID, "status_changed", observation.Status)
-		} else if errors.Is(err, db.ErrTaskLeaseOwner) {
-			return true, nil
+		if strings.TrimSpace(observation.Status) != "" {
+			if err := db.UpdateTaskRunStatusForLeaseContext(txCtx, run.ID, owner, observation.Status, observation.Outcome); err == nil {
+				if _, err := db.AppendTaskEvent(txCtx, run.ID, "status_changed", observation.Status); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, db.ErrTaskStateRegression) && !errors.Is(err, db.ErrTaskAlreadyTerminal) {
+				return err
+			}
 		}
-	}
-	if isTerminal(observation.Status) {
-		if err := db.ReleaseTaskRunLease(run.ID, owner); err != nil {
-			return true, err
+		current, err := db.GetTaskRunContext(txCtx, run.ID)
+		if err != nil {
+			return err
 		}
+		if isTerminal(current.TaskStatus) || observation.PausePolling {
+			return db.ReleaseTaskRunLeaseContext(txCtx, run.ID, owner)
+		}
+		next := observation.NextPollAt
+		if next.IsZero() {
+			next = time.Now().Add(p.retryAfter())
+		}
+		return db.RescheduleTaskRunPollContext(txCtx, run.ID, owner, next)
+	})
+	if errors.Is(err, db.ErrTaskLeaseOwner) {
 		return true, nil
 	}
-	if observation.PausePolling {
-		if err := db.ReleaseTaskRunLease(run.ID, owner); err != nil {
-			return true, err
-		}
-		return true, pollErr
-	}
-	next := observation.NextPollAt
-	if next.IsZero() {
-		next = time.Now().Add(p.retryAfter())
-	}
-	if err := db.RescheduleTaskRunPoll(run.ID, owner, next); err != nil {
+	if err != nil {
 		return true, err
 	}
 	return true, pollErr

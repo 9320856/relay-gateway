@@ -39,7 +39,16 @@ $env:RELAY_DB_ENCRYPTION_KEY = "请替换为稳定的高熵随机值"
 go run .
 ```
 
-首次从本机访问 [http://localhost:8000/setup](http://localhost:8000/setup) 创建管理员。初始化时生成的网关 API Key 仅显示一次，请立即保存。登录 [http://localhost:8000/login](http://localhost:8000/login) 后添加渠道、同步模型并配置映射。
+首次访问服务的 IP 或域名（例如 `http://<服务器IP>:8000/` 或 `https://<网关域名>/`）即可创建管理员，本机也可访问 [http://localhost:8000/setup](http://localhost:8000/setup)。默认不限制首次初始化的来源 IP 或域名。初始化时生成的网关 API Key 仅显示一次，请立即保存。随后登录 `/login` 添加渠道、同步模型并配置映射。
+
+若需要限制谁能创建首个管理员，可在启动前自行设置 `RELAY_SETUP_SECRET`（系统不会自动生成）：
+
+```powershell
+$env:RELAY_SETUP_SECRET = "请替换为高熵初始化口令"
+go run .
+```
+
+设置后，初始化页面会显示必填的「初始化口令」输入框。页面仅通过 `X-Relay-Setup-Secret` 请求头提交该值；直接调用 `/api/auth/setup` 也必须提供此请求头。未设置时无需额外口令；已有管理员后，初始化接口返回 HTTP 409。
 
 客户端使用 `http://localhost:8000/v1` 作为 API Base URL：
 
@@ -54,6 +63,42 @@ Anthropic 客户端调用 `/v1/messages`。前端页面由 Go `embed` 编译进�
 go build -o relay-gateway.exe .
 .\relay-gateway.exe
 ```
+
+### 根路径反向代理
+
+通过根路径（`/`）部署时，若实际连接来自回环或私有 IPv4/IPv6 地址，媒体链接会自动读取反代传来的外部域名、协议和端口，无需设置 `RELAY_TRUST_PROXY`。主机名采用有效的 `X-Forwarded-Host` 首项，否则使用 `Host`；实际 TLS 连接使用 HTTPS，否则采用有效的 `X-Forwarded-Proto` 首项，缺失时使用 HTTP。
+
+`RELAY_TRUST_PROXY=1` 可显式信任转发头；设为 `0` 时媒体链接忽略转发头。自动识别仅用于媒体链接，管理认证和 Cookie 仍按显式信任策略处理（包括通过转发协议判断是否设置 Secure Cookie）。首次初始化与 `RELAY_TRUST_PROXY` 独立，无需启用代理信任即可通过 IP 或域名创建管理员。公网来源或 CDN 不在媒体链接的自动信任范围内。
+
+域名不会持久化，历史媒体链接会在每次响应时按当前请求重新生成。
+
+在配置了证书的 HTTPS `server` 块中，可使用如下 Nginx 配置：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+}
+```
+
+保留 `Host` 可匹配现有 CSRF 来源校验；覆盖转发头可确保其值来自该代理。`proxy_buffering off` 有助于流式请求。常见的本机代理拓扑无需额外设置应用环境变量即可生成正确的媒体链接，但应限制后端端口仅供代理访问。若代理到应用使用明文 HTTP，应用无法从连接本身得知外部 HTTPS；需由代理正确传入 `X-Forwarded-Proto`。相关指令见 [Nginx `proxy_set_header` 文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)。
+
+### Fake-IP 网络中的媒体下载
+
+媒体下载默认检查并固定连接到解析后的公网 IP。使用 Mihomo 等 Fake-IP 网络时，若媒体域名返回 `198.18.0.0/15` 或 `2001:2::/48` 地址，优先为该准确域名配置真实 DNS 解析。网关已对 Profile 渠道同一注册域下的媒体提供受限 Fake-IP 支持。这两个基准测试网段不是普通公网地址；IPv6 范围见 [IANA 特殊用途地址登记](https://www.iana.org/assignments/iana-ipv6-special-registry)。
+
+若渠道将图片或视频保存在不同注册域的 CDN，部署者可在启动前配置准确媒体域名白名单：
+
+```powershell
+$env:RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS = "cdn.provider.com,images.provider.net"
+.\relay-gateway.exe
+```
+
+白名单只接受准确域名，不接受 URL、IP 或通配符；不会根据上游响应自动添加域名。该设置同时适用于同步和后台下载，只额外允许这些域名的 Fake-IP DNS 结果，仍拒绝其他私网地址和公网/Fake-IP 混合结果，并逐跳检查重定向。正常公网解析始终允许。Fake-IP 下载要求本机代理能够路由这些地址；此设置不改变系统代理配置或媒体公开链接的反代规则。
 
 ## 接口
 
@@ -85,11 +130,14 @@ curl http://localhost:8000/v1/videos/<id> \
 - 控制台与 `/api` 管理接口需要管理员会话；写请求还需要 `X-CSRF-Token`。
 - `/v1` 使用独立网关 Key（`Authorization: Bearer` 或 `x-api-key`），管理员 Cookie 不能替代它。
 - 管理 Session 使用 `HttpOnly` 与 `SameSite=Strict` Cookie，管理员密码使用 Argon2id。
-- 首次设置默认仅允许本机访问。通过受信任反向代理初始化时，设置 `RELAY_TRUST_PROXY=1` 与 `RELAY_SETUP_SECRET`，并传入 `X-Relay-Setup-Secret`；生产环境需使用 TLS 并限制管理端口。
+- 登录、初始化和修改密码共用独立的密码计算预算，默认最多同时处理 2 个请求，超出时返回 HTTP 429（`Retry-After: 1`），请稍后重试。启动前可设置 `RELAY_AUTH_HASH_CONCURRENCY=1..32`；每个 Argon2id 计算约使用 64 MiB 内存，应按服务器资源配置。登录限流同时计入正在校验的请求。
+- 首次设置默认允许任意来源 IP 或域名创建首个管理员；可选的 `RELAY_SETUP_SECRET` 要求调用者提供 `X-Relay-Setup-Secret`，网页提供专用输入框。此限制与 `RELAY_TRUST_PROXY` 独立；生产环境需使用 TLS 并限制管理端口。
 - 忘记管理员凭据可在本机运行 `go run . admin reset`，按提示输入 `RESET`。该操作会移除管理员与管理 Session，保留渠道和日志。
 - `config.yaml`、SQLite 数据库及 WAL、媒体文件、日志和编译产物都是本地运行数据，已被忽略，不应提交。请将数据库、媒体目录和加密密钥一起纳入备份与恢复方案。
 
 异步任务和媒体元数据保存在 SQLite，媒体默认位于数据库同级目录的 `media/` 下。面向外部的媒体链接具有访问能力；不要将其作为长期密钥，也不要分享给无关人员。
+
+删除媒体会立即撤销链接，并在后台清理文件；文件被占用或存储错误时保留删除任务自动重试。共享文件会等最后一个有效引用撤销后再删除。任务路由的内存缓存最多保留 10,000 条，并每分钟清理超过 7 天的条目；淘汰后仍可从 SQLite 读取历史映射。
 
 ## 开发
 
@@ -98,6 +146,7 @@ go test -count=2 ./...
 go vet ./...
 node web/app_runtime_test.mjs
 node web/media_runtime_test.mjs
+node web/clipboard_runtime_test.mjs
 ```
 
 提交前还应运行：
