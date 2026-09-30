@@ -115,12 +115,18 @@ func verifyPassword(encoded, password string) bool {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism); err != nil {
 		return false
 	}
+	if iterations == 0 || parallelism == 0 {
+		return false
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return false
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
+		return false
+	}
+	if len(salt) == 0 || len(want) == 0 {
 		return false
 	}
 	got := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))

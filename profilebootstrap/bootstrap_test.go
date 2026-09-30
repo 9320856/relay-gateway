@@ -66,6 +66,29 @@ func TestEnsureBuiltinProfilesRejectsCustomIDCollision(t *testing.T) {
 	}
 }
 
+func TestEnsureBuiltinProfilesRollsBackFailedPublish(t *testing.T) {
+	if err := db.InitDB(t.TempDir() + "/failed-publish.db"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.DB.Exec("CREATE TRIGGER fail_builtin_publish BEFORE UPDATE OF state ON protocol_profile_revisions BEGIN SELECT RAISE(ABORT, 'blocked publish'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureBuiltinProfiles(context.Background()); err == nil || !strings.Contains(err.Error(), "blocked publish") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	firstID := BuiltinProfileID(protocol.BuiltinPresetNames()[0])
+	if _, err := db.GetProtocolProfile(firstID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("failed bootstrap left partial profile %q: %v", firstID, err)
+	}
+	if err := db.DB.Exec("DROP TRIGGER fail_builtin_publish").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureBuiltinProfiles(context.Background()); err != nil {
+		t.Fatalf("retry after failed publish: %v", err)
+	}
+}
+
 func TestEnsureBuiltinProfilesPreservesExistingRevisionsAfterRestart(t *testing.T) {
 	path := t.TempDir() + "/existing.db"
 	if err := db.InitDB(path); err != nil {

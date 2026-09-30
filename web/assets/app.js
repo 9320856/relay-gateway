@@ -3293,12 +3293,7 @@ function normalizeLogMediaURL(value) {
 }
 
 function managedLogMediaURLs(assets, kind) {
-  if (!Array.isArray(assets)) return [];
-  return assets
-    .filter((asset) => String(asset?.kind || "").toLowerCase() === kind &&
-      String(asset?.status || "").toLowerCase() === "available" &&
-      Number(asset?.id) > 0)
-    .sort((a, b) => (Number(a.ordinal) || 0) - (Number(b.ordinal) || 0) || (Number(a.id) || 0) - (Number(b.id) || 0))
+  return managedLogMediaAssets(assets, kind)
     .map((asset) => normalizeMediaURL(asset.public_url || asset.publicUrl || asset.public_link || asset.publicLink, kind))
     .filter(Boolean);
 }
@@ -4755,7 +4750,7 @@ async function initMedia() {
   const previewDialog = byId("media-preview-dialog");
   const previewContent = byId("media-preview-content");
 
-  let currentViewMode = localStorage.getItem("media_view_mode") || "grid";
+  let currentViewMode = localStorage.getItem("media_view_mode") === "table" ? "table" : "grid";
   const setViewMode = (mode) => {
     currentViewMode = mode;
     localStorage.setItem("media_view_mode", mode);
@@ -4892,7 +4887,7 @@ async function initMedia() {
     }, { once: true });
 
     const contentURL = getMediaContentURL(asset);
-    media.src = `/api/media-assets/${encodeURIComponent(asset.id)}/content${isVid ? ".mp4" : ""}`;
+    media.src = contentURL;
 
     if (isVid || isAud) {
       media.controls = true;

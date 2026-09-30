@@ -19,6 +19,16 @@ func TestProfileResultURLsRecoversFanrenImageEnvelope(t *testing.T) {
 	}
 }
 
+func TestProfileSelectJSONArrayIndexRequiresWholeNumber(t *testing.T) {
+	payload := map[string]any{"items": []any{"first", "second"}}
+	if got := profileSelectJSON(payload, "items.1x"); got != nil {
+		t.Fatalf("partial array index selected %v", got)
+	}
+	if got := profileSelectJSON(payload, "items.1"); got != "second" {
+		t.Fatalf("valid array index selected %v", got)
+	}
+}
+
 func TestProfileResultURLsUsesThumbnailWhenFullImageIsAbsent(t *testing.T) {
 	body := `{"job":{"status":"succeeded","assets":[{"thumbnail_url":"https://cdn.example/thumb.png"}]}}`
 	got := profileResultURLs(body, asyncTaskKindImage)

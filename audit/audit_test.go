@@ -42,6 +42,27 @@ func TestAuditAndMutationRollbackTogether(t *testing.T) {
 	}
 }
 
+func TestRecordCandidatesUsesEntryConnection(t *testing.T) {
+	initAuditTestDB(t)
+	conn := db.DB
+	entry, err := StartWithDB(conn, "api_call", "127.0.0.1", "POST", "/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry created with an explicit connection remains usable without the
+	// package's global connection (for example, in an isolated transaction).
+	db.DB = nil
+	defer func() { db.DB = conn }()
+	entry.RecordCandidates([]string{"primary", "fallback"})
+	var count int64
+	if err := conn.Model(&db.RequestEventModel{}).Where("request_id = ? AND phase = ?", entry.ID, "candidate_channels").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("candidate event count = %d, want 1", count)
+	}
+}
+
 func initAuditTestDB(t *testing.T) {
 	t.Helper()
 	if err := db.InitDB(t.TempDir() + "/audit.db"); err != nil {

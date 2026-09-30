@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -10,6 +12,14 @@ import (
 func init() {
 	if os.Getenv("RELAY_DB_ENCRYPTION_KEY") == "" {
 		_ = os.Setenv("RELAY_DB_ENCRYPTION_KEY", "default-test-encryption-key-for-unit-tests-entropy")
+	}
+}
+
+func TestResolveProfileCandidatesContextStopsCanceledLookup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := DefaultDispatcher.ResolveProfileCandidatesContext(ctx, "grok-imagine", "images.create"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lookup error = %v", err)
 	}
 }
 

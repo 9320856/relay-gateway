@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -123,6 +124,74 @@ func TestHTTPExecutorSubmitPollAndContent(t *testing.T) {
 	body, _ := io.ReadAll(content.Body)
 	if string(body) != "video-bytes" || content.HTTPStatus != http.StatusOK {
 		t.Fatalf("content = %d %q", content.HTTPStatus, body)
+	}
+}
+
+func TestHTTPExecutorReadOperationsRotateRejectedCredentials(t *testing.T) {
+	var pollAttempts, contentAttempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/videos/task":
+			pollAttempts.Add(1)
+		case "/videos/task/content":
+			contentAttempts.Add(1)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") == "Bearer expired" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer current" {
+			t.Errorf("unexpected authorization %q", r.Header.Get("Authorization"))
+		}
+		if strings.HasSuffix(r.URL.Path, "/content") {
+			_, _ = io.WriteString(w, "video-bytes")
+			return
+		}
+		_, _ = io.WriteString(w, `{"status":"completed"}`)
+	}))
+	defer server.Close()
+	compiled, err := Compile(testExecutorProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewHTTPExecutor(server.Client())
+	req := Request{BaseURL: server.URL, APIKeys: []string{"expired", "current"}, TaskID: "task"}
+	poll, err := executor.PollOnce(context.Background(), compiled, "video.create", req)
+	if err != nil || poll.Status != "completed" || pollAttempts.Load() != 2 {
+		t.Fatalf("poll = %+v, err=%v, attempts=%d", poll, err, pollAttempts.Load())
+	}
+	content, err := executor.FetchContent(context.Background(), compiled, "video.create", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer content.Body.Close()
+	body, err := io.ReadAll(content.Body)
+	if err != nil || string(body) != "video-bytes" || contentAttempts.Load() != 2 {
+		t.Fatalf("content = %q, err=%v, attempts=%d", body, err, contentAttempts.Load())
+	}
+}
+
+func TestHTTPExecutorReadOperationsDoNotRotateServerErrors(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "upstream failed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	compiled, err := Compile(testExecutorProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewHTTPExecutor(server.Client())
+	req := Request{BaseURL: server.URL, APIKeys: []string{"first", "second"}, TaskID: "task"}
+	if _, err := executor.PollOnce(context.Background(), compiled, "video.create", req); err == nil || attempts.Load() != 1 {
+		t.Fatalf("poll err=%v, attempts=%d", err, attempts.Load())
+	}
+	if _, err := executor.FetchContent(context.Background(), compiled, "video.create", req); err == nil || attempts.Load() != 2 {
+		t.Fatalf("content err=%v, attempts=%d", err, attempts.Load())
 	}
 }
 

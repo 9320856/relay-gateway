@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -400,8 +401,8 @@ func profileSelectJSON(value any, selector string) any {
 		case map[string]any:
 			current = typed[part]
 		case []any:
-			var index int
-			if _, err := fmt.Sscanf(part, "%d", &index); err != nil || index < 0 || index >= len(typed) {
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(typed) {
 				return nil
 			}
 			current = typed[index]

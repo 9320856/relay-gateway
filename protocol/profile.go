@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -435,8 +433,9 @@ func cloneAny(v any) any {
 }
 
 func canonicalJSON(v any) ([]byte, error) {
-	// encoding/json sorts map keys; normalize through an interface to ensure
-	// callers receive the same bytes regardless of map insertion order.
+	// Normalize numeric and map values before encoding. encoding/json sorts
+	// map keys, so a second marshal produces the same canonical bytes without
+	// maintaining a separate recursive encoder.
 	var normalized any
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -445,50 +444,5 @@ func canonicalJSON(v any) ([]byte, error) {
 	if err := json.Unmarshal(data, &normalized); err != nil {
 		return nil, err
 	}
-	return marshalSorted(normalized)
-}
-
-func marshalSorted(v any) ([]byte, error) {
-	switch x := v.(type) {
-	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for key := range x {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		var b bytes.Buffer
-		b.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			keyJSON, _ := json.Marshal(key)
-			b.Write(keyJSON)
-			b.WriteByte(':')
-			valueJSON, err := marshalSorted(x[key])
-			if err != nil {
-				return nil, err
-			}
-			b.Write(valueJSON)
-		}
-		b.WriteByte('}')
-		return b.Bytes(), nil
-	case []any:
-		var b bytes.Buffer
-		b.WriteByte('[')
-		for i, item := range x {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			data, err := marshalSorted(item)
-			if err != nil {
-				return nil, err
-			}
-			b.Write(data)
-		}
-		b.WriteByte(']')
-		return b.Bytes(), nil
-	default:
-		return json.Marshal(v)
-	}
+	return json.Marshal(normalized)
 }

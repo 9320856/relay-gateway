@@ -99,3 +99,39 @@ func TestMediaReconcileDeletesOnlyStaleUntrackedFilesAndReportsMissing(t *testin
 		t.Fatalf("cleanup is not idempotent: %+v, %v", second, err)
 	}
 }
+
+func TestMediaReconcilePreservesLegacyVideoKey(t *testing.T) {
+	if err := db.InitDB(filepath.Join(t.TempDir(), "reconcile-legacy.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	root := t.TempDir()
+	store, err := media.NewLocalObjectStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutAtomic(context.Background(), strings.NewReader("video"), media.PutMeta{Key: "profile/video.mp4"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateMediaObject(&db.MediaObject{ID: "obj-legacy", Backend: "local", StorageKey: "profile/video.media", State: db.MediaObjectReady}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	path := filepath.Join(root, "profile", "video.mp4")
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	poller := NewMediaReconcilePoller(store)
+	poller.DeleteOrphans = true
+	poller.SafetyWindow = time.Minute
+	report, err := poller.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OrphanFiles != 0 || report.RemovedFiles != 0 || report.MissingObjectFiles != 0 {
+		t.Fatalf("legacy video was treated as orphan: %+v", report)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("legacy video was removed: %v", err)
+	}
+}

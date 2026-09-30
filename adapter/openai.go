@@ -244,28 +244,6 @@ func contextIdempotencyKey(ctx context.Context) string {
 	return ""
 }
 
-// Hop-by-hop headers RFC 7230, section 6.1
-var hopByHopHeaders = map[string]bool{
-	"Connection":          true,
-	"Keep-Alive":          true,
-	"Proxy-Authenticate":  true,
-	"Proxy-Authorization": true,
-	"Te":                  true,
-	"Trailers":            true,
-	"Transfer-Encoding":   true,
-	"Upgrade":             true,
-}
-
-var sensitiveResponseHeaders = map[string]bool{
-	"Set-Cookie":                          true,
-	"Set-Cookie2":                         true,
-	"WWW-Authenticate":                    true,
-	"Proxy-Authenticate":                  true,
-	"Proxy-Authorization":                 true,
-	"Content-Security-Policy":             true,
-	"Content-Security-Policy-Report-Only": true,
-}
-
 // copyHeader 标准代理标头透传函数，自动剥离 hop-by-hop 标头与上游 CORS 标头（避免下游浏览器收到重复 CORS 标头导致阻断）
 func copyHeader(dst http.ResponseWriter, src http.Header) {
 	httpforward.CopyHeaders(dst, src)

@@ -24,9 +24,14 @@ func (e *StreamError) Unwrap() error { return e.Err }
 // CopyHeaders excludes connection-specific and upstream browser policy headers.
 func CopyHeaders(dst http.ResponseWriter, src http.Header) {
 	blocked := map[string]bool{"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true, "Te": true, "Trailer": true, "Trailers": true, "Transfer-Encoding": true, "Upgrade": true, "Set-Cookie": true, "Set-Cookie2": true, "Www-Authenticate": true, "Content-Security-Policy": true, "Content-Security-Policy-Report-Only": true}
-	for _, value := range src.Values("Connection") {
-		for _, token := range strings.Split(value, ",") {
-			blocked[http.CanonicalHeaderKey(strings.TrimSpace(token))] = true
+	for name, values := range src {
+		if !strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, token := range strings.Split(value, ",") {
+				blocked[http.CanonicalHeaderKey(strings.TrimSpace(token))] = true
+			}
 		}
 	}
 	for name, values := range src {

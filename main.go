@@ -18,6 +18,7 @@ import (
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/db"
+	"relay-gateway/internal/noreplace"
 	"relay-gateway/media"
 	"relay-gateway/migration"
 	"relay-gateway/profilebootstrap"
@@ -271,18 +272,23 @@ func migrateLegacyMediaFiles(profileDir string) {
 		newName := strings.TrimSuffix(oldName, ".media") + ".mp4"
 		oldPath := filepath.Join(profileDir, oldName)
 		newPath := filepath.Join(profileDir, newName)
-		if err := os.Rename(oldPath, newPath); err == nil {
-			oldKey := "profile/" + oldName
-			newKey := "profile/" + newName
-			if db.DB != nil {
-				if err := db.DB.Model(&db.MediaObject{}).Where("storage_key = ?", oldKey).Update("storage_key", newKey).Error; err != nil {
-					log.Printf("[MediaStore] DB update failed for %s -> %s: %v, reverting file rename", oldName, newName, err)
-					_ = os.Rename(newPath, oldPath)
-					continue
-				}
-			}
-			log.Printf("[MediaStore] Migrated legacy media file: %s -> %s", oldName, newName)
+		// Never replace an existing media file with the same new name.
+		if err := noreplace.Rename(oldPath, newPath); err != nil {
+			log.Printf("[MediaStore] Skipping legacy media file %s -> %s: %v", oldName, newName, err)
+			continue
 		}
+		oldKey := "profile/" + oldName
+		newKey := "profile/" + newName
+		if db.DB != nil {
+			if err := db.DB.Model(&db.MediaObject{}).Where("storage_key = ?", oldKey).Update("storage_key", newKey).Error; err != nil {
+				log.Printf("[MediaStore] DB update failed for %s -> %s: %v", oldName, newName, err)
+				if rollbackErr := noreplace.Rename(newPath, oldPath); rollbackErr != nil {
+					log.Printf("[MediaStore] Cannot restore legacy media name %s: %v", oldName, rollbackErr)
+				}
+				continue
+			}
+		}
+		log.Printf("[MediaStore] Migrated legacy media file: %s -> %s", oldName, newName)
 	}
 
 	// Reconcile interrupted migrations where the disk file was already renamed to .mp4

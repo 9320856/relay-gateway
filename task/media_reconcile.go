@@ -57,6 +57,9 @@ func (p *MediaReconcilePoller) RunOnce(ctx context.Context) (MediaReconcileRepor
 		key := strings.TrimSpace(object.StorageKey)
 		if key != "" {
 			known[key] = struct{}{}
+			if legacyKey := media.AlternateObjectKey(key); legacyKey != "" {
+				known[legacyKey] = struct{}{}
+			}
 		}
 	}
 	files, err := p.Store.ListFiles(ctx)

@@ -508,6 +508,18 @@ func (d *Dispatcher) ResolveCandidates(modelName string) ([]*config.UpstreamChan
 // Priority, weight, model matching, and breaker behavior remain identical to
 // the legacy dispatcher so rollout does not change scheduling semantics.
 func (d *Dispatcher) ResolveProfileCandidates(modelName, operation string) ([]*config.UpstreamChannel, error) {
+	return d.ResolveProfileCandidatesContext(context.Background(), modelName, operation)
+}
+
+// ResolveProfileCandidatesContext also lets request handlers stop binding
+// lookups promptly when their client disconnects.
+func (d *Dispatcher) ResolveProfileCandidatesContext(ctx context.Context, modelName, operation string) ([]*config.UpstreamChannel, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	channels := d.getActiveChannels()
 	if len(channels) == 0 {
 		return nil, fmt.Errorf("no active upstream channels configured or all channels disabled")
@@ -520,7 +532,7 @@ func (d *Dispatcher) ResolveProfileCandidates(modelName, operation string) ([]*c
 	eligible := make([]config.UpstreamChannel, 0, len(channels))
 	for i := range channels {
 		ch := channels[i]
-		_, err := db.FindChannelProtocolBindingContext(context.Background(), ch.ID, operation, modelName)
+		_, err := db.FindChannelProtocolBindingContext(ctx, ch.ID, operation, modelName)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			continue
 		}
@@ -528,6 +540,9 @@ func (d *Dispatcher) ResolveProfileCandidates(modelName, operation string) ([]*c
 			return nil, fmt.Errorf("resolve profile binding for channel %s: %w", ch.ID, err)
 		}
 		eligible = append(eligible, ch)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(eligible) == 0 {
 		return nil, fmt.Errorf("no active upstream channel has an enabled profile binding for operation %q and model %q", operation, modelName)

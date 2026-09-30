@@ -70,7 +70,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		var err error
-		candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(req.Model, "video.create")
+		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, "video.create")
 		if err != nil {
 			return nil, nil, false, nil
 		}

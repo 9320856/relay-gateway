@@ -372,6 +372,19 @@ const managedOnlyFigure = vm.runInContext(
 assert.equal(managedOnlyFigure.querySelector("a"), null, "admin-only log previews must not expose open/download links");
 assert.ok(managedOnlyFigure.querySelector("button"), "admin-only log previews may retain playback controls");
 
+const mediaStorage = new Map([["media_view_mode", "retired-layout"]]);
+context.localStorage = {
+  getItem: (key) => mediaStorage.get(key) ?? null,
+  setItem: (key, value) => mediaStorage.set(key, value),
+};
+fetchImpl = async (requestPath) => response(200, requestPath === "/api/auth/me"
+  ? { username: "admin", csrf_token: "csrf" }
+  : { data: [] });
+await vm.runInContext("initMedia()", context);
+assert.equal(document.getElementById("media-grid").classList.contains("hidden"), false, "invalid saved media view should show the grid");
+assert.equal(document.getElementById("media-table-wrap").classList.contains("hidden"), true, "invalid saved media view should hide the table");
+assert.equal(mediaStorage.get("media_view_mode"), "grid", "invalid saved media view should be replaced with a usable mode");
+
 const imagePollPathStart = fetchedPaths.length;
 let imagePollCalls = 0;
 fetchImpl = async () => {

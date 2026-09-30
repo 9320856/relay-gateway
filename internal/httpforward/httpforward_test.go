@@ -26,6 +26,22 @@ func TestCopyHeadersFiltersUpstreamPolicyAndConnectionTokens(t *testing.T) {
 	}
 }
 
+func TestCopyHeadersFiltersConnectionTokensFromNoncanonicalHeaderMap(t *testing.T) {
+	dst := httptest.NewRecorder()
+	src := http.Header{
+		"connection":   {"X-Private"},
+		"X-Private":    {"secret"},
+		"Content-Type": {"application/json"},
+	}
+	CopyHeaders(dst, src)
+	if got := dst.Header().Get("X-Private"); got != "" {
+		t.Fatalf("connection-scoped header leaked: %q", got)
+	}
+	if got := dst.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q", got)
+	}
+}
+
 func TestStreamFlushesAndHonorsCancellation(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	n, err := Stream(context.Background(), strings.NewReader("event"), recorder)

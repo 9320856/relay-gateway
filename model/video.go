@@ -19,7 +19,8 @@ func NormalizeVideoStatus(raw string) string {
 // image and audit task flows. In particular, cancelled/canceled is terminal
 // failure everywhere instead of being rendered as a provider-specific state.
 func NormalizeTaskStatus(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
 	case "succeeded", "success", "complete", "completed", "done":
 		return VideoStatusCompleted
 	case "running", "in_progress", "in-progress", "generating", "processing":
@@ -29,7 +30,7 @@ func NormalizeTaskStatus(raw string) string {
 	case "failed", "error", "errored", "cancelled", "canceled", "rejected", "expired":
 		return VideoStatusFailed
 	default:
-		return strings.ToLower(strings.TrimSpace(raw)) // 未知状态透传，不丢信息
+		return normalized // 未知状态透传，不丢信息
 	}
 }
 

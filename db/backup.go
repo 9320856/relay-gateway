@@ -11,6 +11,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"relay-gateway/internal/noreplace"
 )
 
 // DatabaseIntegrityReport is the result of inspecting a SQLite database.
@@ -50,6 +52,14 @@ func BackupDatabase(ctx context.Context, sourcePath, destinationPath string) err
 	} else if !info.IsDir() {
 		return fmt.Errorf("backup destination parent is not a directory: %s", parent)
 	}
+	// Build the snapshot in a private directory. Publishing with Link is
+	// atomic and fails if another process creates the destination meanwhile.
+	tempDir, err := os.MkdirTemp(parent, ".relay-backup-*")
+	if err != nil {
+		return fmt.Errorf("create backup work directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	snapshot := filepath.Join(tempDir, "snapshot.db")
 
 	conn, err := gorm.Open(sqlite.Open(source), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
@@ -62,11 +72,15 @@ func BackupDatabase(ctx context.Context, sourcePath, destinationPath string) err
 	defer sqlDB.Close()
 	// A bound parameter avoids SQL injection and works with paths containing
 	// quotes; SQLite accepts an expression for VACUUM INTO.
-	if err := conn.WithContext(ctx).Exec("VACUUM INTO ?", destination).Error; err != nil {
-		if _, statErr := os.Lstat(destination); statErr == nil {
-			_ = os.Remove(destination)
-		}
+	if err := conn.WithContext(ctx).Exec("VACUUM INTO ?", snapshot).Error; err != nil {
 		return fmt.Errorf("create database backup: %w", err)
+	}
+	if err := os.Link(snapshot, destination); err != nil {
+		// Some filesystems do not support hard links. Rename with an explicit
+		// no-replace operation keeps the finished snapshot private until publish.
+		if renameErr := noreplace.Rename(snapshot, destination); renameErr != nil {
+			return fmt.Errorf("publish database backup (link: %v, rename: %w)", err, renameErr)
+		}
 	}
 	return nil
 }

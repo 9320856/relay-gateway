@@ -36,6 +36,8 @@ const auditContextKey contextKey = "audit_entry"
 var sensitiveName = regexp.MustCompile(`(?i)(authorization|api[-_]?key|token|secret|password|cookie|credential|signature)`)
 var sensitiveInline = regexp.MustCompile(`(?i)\b(authorization|api[-_ ]?key|token|secret|password|cookie|credential|signature)\b\s*[:=]\s*["']?[^\s"',}&]+`)
 var mediaCapabilityURL = regexp.MustCompile(`(?i)(?:https?://[^\s/"']+)?/v1/media/[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+`)
+var bearerSecret = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+\-/]+=*`)
+var skSecret = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9._~+\-/]+=*`)
 
 type AuditEntry struct {
 	mu                  sync.Mutex
@@ -357,7 +359,7 @@ func (e *AuditEntry) RecordCandidates(channelIDs []string) {
 	defer cancel()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(channelIDs) == 0 || e.startErr != nil || db.DB == nil {
+	if len(channelIDs) == 0 || e.startErr != nil || conn == nil {
 		return
 	}
 	_ = e.addEventLockedOn(conn, "candidate_channels", EventData{Data: map[string]any{"channel_ids": channelIDs}})
@@ -633,7 +635,7 @@ func MarkAsyncTaskPoll(ctx context.Context, taskID, taskKind, status string, res
 		return false
 	}
 	status = NormalizeAsyncTaskStatus(status)
-	if taskKind == "" || status == "" {
+	if status == "" {
 		return false
 	}
 	resultBody, resultTruncated := sanitizeAsyncTaskResult(response)
@@ -1170,8 +1172,8 @@ func sanitizeURL(raw string) string {
 func sanitizeText(value string) string {
 	value = mediaCapabilityURL.ReplaceAllString(value, "[MEDIA_URL_REDACTED]")
 	value = sensitiveInline.ReplaceAllString(value, "$1=[REDACTED]")
-	value = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+\-/]+=*`).ReplaceAllString(value, "Bearer [REDACTED]")
-	return regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9._~+\-/]+=*`).ReplaceAllString(value, "[REDACTED]")
+	value = bearerSecret.ReplaceAllString(value, "Bearer [REDACTED]")
+	return skSecret.ReplaceAllString(value, "[REDACTED]")
 }
 
 func isPublicMediaURLPath(path string) bool {

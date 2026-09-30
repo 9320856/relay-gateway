@@ -87,14 +87,14 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		var err error
-		candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(req.Model, operation)
+		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, operation)
 		if err != nil {
 			operation = "images.create"
-			candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(req.Model, operation)
+			candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, operation)
 		}
 		if err != nil {
 			operation = "images.generations"
-			candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(req.Model, operation)
+			candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, operation)
 		}
 		if err != nil {
 			return nil, nil, false, nil

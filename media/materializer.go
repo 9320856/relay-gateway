@@ -99,10 +99,11 @@ func (w *MaterializationWorker) Materialize(ctx context.Context, result MediaRes
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if w.Fetcher == nil {
-		w.Fetcher = InlineSourceFetcher{}
+	fetcher := w.Fetcher
+	if fetcher == nil {
+		fetcher = InlineSourceFetcher{}
 	}
-	fetched, err := w.Fetcher.Fetch(ctx, result)
+	fetched, err := fetcher.Fetch(ctx, result)
 	if err != nil {
 		return ObjectInfo{}, err
 	}

@@ -58,23 +58,33 @@ func ensureBuiltinProfile(ctx context.Context, name string) (bool, error) {
 	profileID := BuiltinProfileID(name)
 	profile, err := db.GetProtocolProfileContext(ctx, profileID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		profile = &db.ProtocolProfile{ID: profileID, Name: draft.Name, Source: db.ProfileSourceBuiltin}
-		if err := db.CreateProtocolProfileContext(ctx, profile); err != nil {
-			return false, fmt.Errorf("create builtin profile %q: %w", name, err)
-		}
-		revision := &db.ProtocolProfileRevision{
-			ProfileID:     profileID,
-			Revision:      1,
-			SchemaVersion: compiled.Profile().SchemaVersion,
-			ContentJSON:   string(compiled.CanonicalJSON()),
-			ContentDigest: compiled.Digest(),
-			State:         db.ProfileRevisionDraft,
-		}
-		if err := db.SaveProtocolProfileRevisionContext(ctx, revision); err != nil {
-			return false, fmt.Errorf("create builtin profile %q revision: %w", name, err)
-		}
-		if err := db.PublishProtocolProfileRevisionContext(ctx, profileID, 1); err != nil {
-			return false, fmt.Errorf("publish builtin profile %q revision: %w", name, err)
+		// A partially written built-in cannot be repaired on the next startup
+		// without risking an operator-managed revision. Commit all three writes
+		// together so an interrupted bootstrap leaves no incomplete profile.
+		err = db.SQLDBForContext(ctx).Transaction(func(tx *gorm.DB) error {
+			txCtx := db.WithTx(ctx, tx)
+			createdProfile := &db.ProtocolProfile{ID: profileID, Name: draft.Name, Source: db.ProfileSourceBuiltin}
+			if err := db.CreateProtocolProfileContext(txCtx, createdProfile); err != nil {
+				return fmt.Errorf("create builtin profile %q: %w", name, err)
+			}
+			revision := &db.ProtocolProfileRevision{
+				ProfileID:     profileID,
+				Revision:      1,
+				SchemaVersion: compiled.Profile().SchemaVersion,
+				ContentJSON:   string(compiled.CanonicalJSON()),
+				ContentDigest: compiled.Digest(),
+				State:         db.ProfileRevisionDraft,
+			}
+			if err := db.SaveProtocolProfileRevisionContext(txCtx, revision); err != nil {
+				return fmt.Errorf("create builtin profile %q revision: %w", name, err)
+			}
+			if err := db.PublishProtocolProfileRevisionContext(txCtx, profileID, 1); err != nil {
+				return fmt.Errorf("publish builtin profile %q revision: %w", name, err)
+			}
+			return nil
+		})
+		if err != nil {
+			return false, err
 		}
 		return true, nil
 	}

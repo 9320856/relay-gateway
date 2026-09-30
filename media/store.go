@@ -104,6 +104,19 @@ func (s *LocalObjectStore) withinResolved(path string) error {
 	return nil
 }
 
+// AlternateObjectKey returns the historical .media/.mp4 spelling of a key.
+// LocalObjectStore accepts either spelling when reading or deleting videos.
+func AlternateObjectKey(key string) string {
+	switch {
+	case strings.HasSuffix(key, ".media"):
+		return strings.TrimSuffix(key, ".media") + ".mp4"
+	case strings.HasSuffix(key, ".mp4"):
+		return strings.TrimSuffix(key, ".mp4") + ".media"
+	default:
+		return ""
+	}
+}
+
 func (s *LocalObjectStore) PutAtomic(ctx context.Context, src io.Reader, meta PutMeta) (ObjectInfo, error) {
 	if src == nil {
 		return ObjectInfo{}, errors.New("media source is nil")
@@ -188,13 +201,7 @@ func (s *LocalObjectStore) Open(ctx context.Context, key string, r *ByteRange) (
 	}
 	f, err := os.Open(path)
 	if err != nil && os.IsNotExist(err) {
-		altKey := ""
-		if strings.HasSuffix(key, ".media") {
-			altKey = strings.TrimSuffix(key, ".media") + ".mp4"
-		} else if strings.HasSuffix(key, ".mp4") {
-			altKey = strings.TrimSuffix(key, ".mp4") + ".media"
-		}
-		if altKey != "" {
+		if altKey := AlternateObjectKey(key); altKey != "" {
 			if altPath, altErr := s.path(altKey); altErr == nil {
 				if altF, altOpenErr := os.Open(altPath); altOpenErr == nil {
 					f = altF
@@ -220,7 +227,7 @@ func (s *LocalObjectStore) Open(ctx context.Context, key string, r *ByteRange) (
 	if r == nil {
 		return f, info, nil
 	}
-	if r.Start < 0 || r.Start > st.Size() || r.Length < -1 || (r.Length >= 0 && r.Start+r.Length > st.Size()) {
+	if r.Start < 0 || r.Start > st.Size() || r.Length < -1 || (r.Length >= 0 && r.Length > st.Size()-r.Start) {
 		f.Close()
 		return nil, ObjectInfo{}, ErrInvalidRange
 	}
@@ -252,13 +259,7 @@ func (s *LocalObjectStore) Stat(ctx context.Context, key string) (ObjectInfo, er
 	}
 	st, e := os.Stat(p)
 	if e != nil && os.IsNotExist(e) {
-		altKey := ""
-		if strings.HasSuffix(key, ".media") {
-			altKey = strings.TrimSuffix(key, ".media") + ".mp4"
-		} else if strings.HasSuffix(key, ".mp4") {
-			altKey = strings.TrimSuffix(key, ".mp4") + ".media"
-		}
-		if altKey != "" {
+		if altKey := AlternateObjectKey(key); altKey != "" {
 			if altPath, altErr := s.path(altKey); altErr == nil {
 				if altSt, altStatErr := os.Stat(altPath); altStatErr == nil {
 					st = altSt
@@ -280,25 +281,22 @@ func (s *LocalObjectStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p, e := s.path(key)
-	if e != nil {
-		return e
+	if _, err := s.path(key); err != nil {
+		return err
 	}
-	e = os.Remove(p)
-	altKey := ""
-	if strings.HasSuffix(key, ".media") {
-		altKey = strings.TrimSuffix(key, ".media") + ".mp4"
-	} else if strings.HasSuffix(key, ".mp4") {
-		altKey = strings.TrimSuffix(key, ".mp4") + ".media"
+	key = filepath.Clean(key)
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return err
 	}
-	if altKey != "" {
-		if altPath, altErr := s.path(altKey); altErr == nil {
-			_ = os.Remove(altPath)
-		}
+	defer root.Close()
+	err = root.Remove(key)
+	if altKey := AlternateObjectKey(key); altKey != "" {
+		_ = root.Remove(altKey)
 	}
-	if os.IsNotExist(e) {
+	if os.IsNotExist(err) {
 		return nil
 	}
-	return e
+	return err
 }
 func (s *LocalObjectStore) String() string { return fmt.Sprintf("LocalObjectStore(%s)", s.root) }

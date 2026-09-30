@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"time"
 
 	"relay-gateway/db"
@@ -143,38 +142,7 @@ func (p *MediaDeletionPoller) Start(ctx context.Context) error {
 	if p == nil || p.Store == nil {
 		return errors.New("media deletion store is required")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	workers := p.Workers
-	if workers <= 0 {
-		workers = 1
-	}
-	if workers > 16 {
-		workers = 16
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for ctx.Err() == nil {
-				claimed, err := p.RunOnce(ctx)
-				if err != nil && !claimed {
-					if !waitContext(ctx, time.Second) {
-						return
-					}
-					continue
-				}
-				if !claimed && !waitContext(ctx, 250*time.Millisecond) {
-					return
-				}
-			}
-		}()
-	}
-	<-ctx.Done()
-	wg.Wait()
-	return ctx.Err()
+	return runPollWorkers(ctx, p.Workers, 16, p.RunOnce)
 }
 
 func (p *MediaDeletionPoller) lease() time.Duration {

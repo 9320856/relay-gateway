@@ -118,15 +118,19 @@ func (p *BackgroundPoller) Start(ctx context.Context) error {
 	if p == nil || p.Poll == nil {
 		return errors.New("background poll function is required")
 	}
+	return runPollWorkers(ctx, p.Workers, 32, p.RunOnce)
+}
+
+// runPollWorkers bounds worker concurrency and joins in-flight work on shutdown.
+func runPollWorkers(ctx context.Context, workers, maxWorkers int, runOnce func(context.Context) (bool, error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	workers := p.Workers
 	if workers <= 0 {
 		workers = 1
 	}
-	if workers > 32 {
-		workers = 32
+	if workers > maxWorkers {
+		workers = maxWorkers
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -134,17 +138,15 @@ func (p *BackgroundPoller) Start(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				claimed, err := p.RunOnce(ctx)
+				claimed, err := runOnce(ctx)
 				if err != nil && !claimed {
 					if !waitContext(ctx, time.Second) {
 						return
 					}
 					continue
 				}
-				if !claimed {
-					if !waitContext(ctx, 250*time.Millisecond) {
-						return
-					}
+				if !claimed && !waitContext(ctx, 250*time.Millisecond) {
+					return
 				}
 			}
 		}()

@@ -99,14 +99,14 @@ func materializeProfileImageResponse(c *gin.Context, taskRunID, baseURL string, 
 		return nil
 	}
 	replacements := make(map[string]string, len(sourceURLs))
-	managed := make([]string, 0, len(sourceURLs))
+	managedData := make([]map[string]string, 0, len(sourceURLs))
 	for ordinal, sourceURL := range sourceURLs {
 		stableURL, err := materializeProfileMediaURL(c, taskRunID, "image", ordinal, sourceURL, baseURL)
 		if err != nil {
 			return err
 		}
 		replacements[sourceURL] = stableURL
-		managed = append(managed, stableURL)
+		managedData = append(managedData, map[string]string{"url": stableURL})
 	}
 	if data, ok := response["data"].([]map[string]string); ok {
 		for _, item := range data {
@@ -117,10 +117,7 @@ func materializeProfileImageResponse(c *gin.Context, taskRunID, baseURL string, 
 			}
 		}
 	} else {
-		response["data"] = make([]map[string]string, 0, len(managed))
-		for _, stable := range managed {
-			response["data"] = append(response["data"].([]map[string]string), map[string]string{"url": stable})
-		}
+		response["data"] = managedData
 	}
 	for _, key := range []string{"raw", "raw_payload"} {
 		if value, exists := response[key]; exists {

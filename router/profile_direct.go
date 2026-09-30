@@ -44,7 +44,7 @@ func profileEngineMultipartDirect(c *gin.Context, operation string, form *multip
 	if pinned != nil {
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
-		candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(modelName, operation)
+		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, operation)
 	}
 	if err != nil {
 		return false, nil
@@ -258,7 +258,7 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 	if pinned != nil {
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
-		candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(modelName, bindingOperation)
+		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, bindingOperation)
 	}
 	// The built-in image preset historically used images.create while some
 	// custom profiles use the singular image.create spelling. Treat the latter
@@ -266,7 +266,7 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 	// name that actually matched its binding.
 	if err != nil && operation == "images.create" {
 		bindingOperation = "image.create"
-		candidates, err = service.DefaultDispatcher.ResolveProfileCandidates(modelName, bindingOperation)
+		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, bindingOperation)
 	}
 	if err != nil {
 		return false, nil, nil

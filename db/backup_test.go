@@ -9,6 +9,8 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"relay-gateway/internal/noreplace"
 )
 
 func makeBackupTestDB(t *testing.T, version string) string {
@@ -85,5 +87,34 @@ func TestBackupDatabaseHonorsCanceledContext(t *testing.T) {
 	cancel()
 	if err := BackupDatabase(ctx, source, filepath.Join(t.TempDir(), "backup.db")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("BackupDatabase(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRenameBackupNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "snapshot.db")
+	destination := filepath.Join(dir, "backup.db")
+	if err := os.WriteFile(source, []byte("snapshot"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("current"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := noreplace.Rename(source, destination); err == nil {
+		t.Fatal("rename replaced an existing backup")
+	}
+	if content, err := os.ReadFile(destination); err != nil || string(content) != "current" {
+		t.Fatalf("existing backup changed: content=%q err=%v", content, err)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := noreplace.Rename(source, destination); errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("atomic no-replace rename is unavailable on this platform")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(destination); err != nil || string(content) != "snapshot" {
+		t.Fatalf("published backup: content=%q err=%v", content, err)
 	}
 }

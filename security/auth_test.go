@@ -87,3 +87,15 @@ func TestLoginRateLimitUsesIPWithoutSourcePort(t *testing.T) {
 	}
 	RecordLoginResult("203.0.113.9:1234", username, true)
 }
+
+func TestVerifyPasswordRejectsInvalidArgon2Parameters(t *testing.T) {
+	for _, encoded := range []string{
+		"$argon2id$v=19$m=65536,t=0,p=2$c2FsdA$YWJjZA",
+		"$argon2id$v=19$m=65536,t=3,p=0$c2FsdA$YWJjZA",
+		"$argon2id$v=19$m=8,t=1,p=1$$",
+	} {
+		if verifyPassword(encoded, "password") {
+			t.Fatalf("invalid Argon2 parameters verified: %q", encoded)
+		}
+	}
+}

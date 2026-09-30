@@ -101,3 +101,43 @@ func TestMigrateLegacyMediaFiles_InterruptedReconciliation(t *testing.T) {
 		t.Fatalf("expected reconciled storage_key %q, got %q", "profile/interrupted_video.mp4", reconciled.StorageKey)
 	}
 }
+
+func TestMigrateLegacyMediaFiles_PreservesExistingDestination(t *testing.T) {
+	tempDir := t.TempDir()
+	profileDir := filepath.Join(tempDir, "media", "profile")
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InitDB(filepath.Join(tempDir, "conflict.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	oldPath := filepath.Join(profileDir, "video.media")
+	newPath := filepath.Join(profileDir, "video.mp4")
+	for path, content := range map[string]string{oldPath: "legacy", newPath: "current"} {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	obj := &db.MediaObject{ID: "obj_conflict", Backend: "local", StorageKey: "profile/video.media", SHA256: "legacy-sha", ByteSize: 6, ContentType: "video/mp4", State: "available"}
+	if err := db.DB.Create(obj).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	migrateLegacyMediaFiles(profileDir)
+
+	for path, want := range map[string]string{oldPath: "legacy", newPath: "current"} {
+		content, err := os.ReadFile(path)
+		if err != nil || string(content) != want {
+			t.Fatalf("file %s changed: content=%q err=%v", path, content, err)
+		}
+	}
+	var stored db.MediaObject
+	if err := db.DB.First(&stored, "id = ?", obj.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.StorageKey != obj.StorageKey {
+		t.Fatalf("storage key changed to %q", stored.StorageKey)
+	}
+}

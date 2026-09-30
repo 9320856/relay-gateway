@@ -122,7 +122,7 @@ func (e *HTTPExecutor) ExecuteRaw(ctx context.Context, profile CompiledProfile, 
 			return result, executorErrorWithResponse("submit", resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), mutatingMethod(op.Submit.Method) && resp.StatusCode >= 500, false, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		}
 		if stream {
-			copyResponseHeaders(w, resp.Header)
+			httpforward.CopyHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			written, copyErr := httpforward.Stream(ctx, io.LimitReader(resp.Body, e.maxResponseBytes(req)), w)
 			if copyErr == nil && written == e.maxResponseBytes(req) {
@@ -156,7 +156,7 @@ func (e *HTTPExecutor) ExecuteRaw(ctx context.Context, profile CompiledProfile, 
 		if int64(len(result.RawBody)) > e.maxResponseBytes(req) {
 			return result, executorError("read", resp.StatusCode, mutatingMethod(op.Submit.Method), false, ErrResponseTooLarge)
 		}
-		copyResponseHeaders(w, resp.Header)
+		httpforward.CopyHeaders(w, resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		if _, err := w.Write(result.RawBody); err != nil {
 			return result, executorError("write", resp.StatusCode, false, false, err)
@@ -350,26 +350,34 @@ func (e *HTTPExecutor) FetchContent(ctx context.Context, profile CompiledProfile
 	if err != nil {
 		return ContentResult{}, err
 	}
-	httpReq, err := e.newRequest(ctx, op.Content.Method, path, req, nil, "")
-	if err != nil {
-		return ContentResult{}, err
-	}
-	applyHeaders(httpReq, op.Content.Headers)
 	keys := normalizedKeys(req.APIKeys)
-	if len(keys) > 0 {
-		applyAPIKeyHeader(httpReq, keys[0], req.APIKeyHeader)
+	if len(keys) == 0 {
+		keys = []string{""}
 	}
-	resp, err := e.client().Do(httpReq)
-	if err != nil {
-		return ContentResult{}, executorError("content", 0, false, false, err)
+	for i, key := range keys {
+		httpReq, err := e.newRequest(ctx, op.Content.Method, path, req, nil, "")
+		if err != nil {
+			return ContentResult{}, err
+		}
+		applyHeaders(httpReq, op.Content.Headers)
+		applyAPIKeyHeader(httpReq, key, req.APIKeyHeader)
+		resp, err := e.client().Do(httpReq)
+		if err != nil {
+			return ContentResult{}, executorError("content", 0, false, false, err)
+		}
+		if !mutatingMethod(op.Content.Method) && i+1 < len(keys) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			_ = resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
+			return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header}, executorErrorWithResponse("content", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), resp.Header.Get("Retry-After"), false, resp.StatusCode >= 500, fmt.Errorf("upstream returned status %d", resp.StatusCode))
+		}
+		transferred = true
+		return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}}, nil
 	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
-		return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header}, executorErrorWithResponse("content", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), resp.Header.Get("Retry-After"), false, resp.StatusCode >= 500, fmt.Errorf("upstream returned status %d", resp.StatusCode))
-	}
-	transferred = true
-	return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}}, nil
+	return ContentResult{}, errors.New("no content credentials available")
 }
 
 type cancelOnCloseBody struct {
@@ -390,7 +398,7 @@ func (b *cancelOnCloseBody) Close() error {
 	return b.ReadCloser.Close()
 }
 
-func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Request, body any, encoding string, operationHeaders map[string]string, allowKeyRotation bool, vars map[string]string) (Result, error) {
+func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Request, body any, encoding string, operationHeaders map[string]string, submitting bool, vars map[string]string) (Result, error) {
 	if vars != nil {
 		var err error
 		path, err = expandPath(path, vars)
@@ -406,6 +414,10 @@ func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Requ
 	if len(keys) == 0 {
 		keys = []string{""}
 	}
+	phase := "poll"
+	if submitting {
+		phase = "submit"
+	}
 	var lastExecutorErr error
 	for i, key := range keys {
 		httpReq, reqErr := e.newRequest(ctx, method, path, req, encoded, contentType)
@@ -416,13 +428,9 @@ func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Requ
 		applyAPIKeyHeader(httpReq, key, req.APIKeyHeader)
 		resp, doErr := e.client().Do(httpReq)
 		if doErr != nil {
-			phase := "poll"
-			if allowKeyRotation {
-				phase = "submit"
-			}
 			mayHaveSubmitted := mutatingMethod(method)
 			lastExecutorErr = executorError(phase, 0, mayHaveSubmitted, false, doErr)
-			if allowKeyRotation && !mayHaveSubmitted && i+1 < len(keys) {
+			if submitting && !mayHaveSubmitted && i+1 < len(keys) {
 				continue
 			}
 			return Result{}, lastExecutorErr
@@ -434,15 +442,11 @@ func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Requ
 			}
 			return result, readErr
 		}
-		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && allowKeyRotation && i+1 < len(keys) {
-			lastExecutorErr = executorErrorWithResponse("submit", resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), false, true, fmt.Errorf("upstream returned status %d", resp.StatusCode))
+		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && (submitting || !mutatingMethod(method)) && i+1 < len(keys) {
+			lastExecutorErr = executorErrorWithResponse(phase, resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), false, true, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			phase := "poll"
-			if allowKeyRotation {
-				phase = "submit"
-			}
 			return result, executorErrorWithResponse(phase, resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), mutatingMethod(method) && resp.StatusCode >= 500, false, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		}
 		return result, nil
@@ -650,13 +654,6 @@ func applyAPIKeyHeader(req *http.Request, key, header string) {
 		return
 	}
 	req.Header.Set(header, key)
-}
-
-func copyResponseHeaders(dst http.ResponseWriter, src http.Header) {
-	if dst == nil {
-		return
-	}
-	httpforward.CopyHeaders(dst, src)
 }
 
 func normalizedKeys(keys []string) []string {

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"relay-gateway/db"
@@ -82,7 +81,7 @@ func (p *MediaMaterializationPoller) RunOnce(ctx context.Context) (bool, error) 
 		if errors.Is(err, db.ErrMediaAssetGone) || errors.Is(err, db.ErrMediaJobLeaseOwner) {
 			return p.complete(job)
 		}
-		return p.failWithAsset(job, asset.ID, err)
+		return p.failWithAsset(job, err)
 	}
 	return true, nil
 }
@@ -192,7 +191,7 @@ func (p *MediaMaterializationPoller) fail(job *db.MediaMaterializationJob, cause
 	return true, cause
 }
 
-func (p *MediaMaterializationPoller) failWithAsset(job *db.MediaMaterializationJob, assetID uint, cause error) (bool, error) {
+func (p *MediaMaterializationPoller) failWithAsset(job *db.MediaMaterializationJob, cause error) (bool, error) {
 	if cause == nil {
 		cause = errors.New("media materialization failed")
 	}
@@ -216,38 +215,7 @@ func (p *MediaMaterializationPoller) Start(ctx context.Context) error {
 	if p == nil || p.Store == nil {
 		return errors.New("media materialization store is required")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	workers := p.Workers
-	if workers <= 0 {
-		workers = 1
-	}
-	if workers > 16 {
-		workers = 16
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for ctx.Err() == nil {
-				claimed, err := p.RunOnce(ctx)
-				if err != nil && !claimed {
-					if !waitContext(ctx, time.Second) {
-						return
-					}
-					continue
-				}
-				if !claimed && !waitContext(ctx, 250*time.Millisecond) {
-					return
-				}
-			}
-		}()
-	}
-	<-ctx.Done()
-	wg.Wait()
-	return ctx.Err()
+	return runPollWorkers(ctx, p.Workers, 16, p.RunOnce)
 }
 
 func (p *MediaMaterializationPoller) fetcher() media.SourceFetcher {
