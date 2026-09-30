@@ -40,6 +40,62 @@ func CreateMediaAssetForMaterializationContext(ctx context.Context, asset *Media
 	return job, err
 }
 
+// ClaimMediaAssetMaterializationContext claims one existing logical asset.
+// Synchronous batches use the same due-job and lease rules as background
+// workers, so retries reuse assets and cannot download another worker's job.
+func ClaimMediaAssetMaterializationContext(ctx context.Context, assetID uint, owner string, lease time.Duration) (*MediaMaterializationJob, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn, err := mediaDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owner, err = mediaMaterializationOwner(owner)
+	if err != nil {
+		return nil, err
+	}
+	if lease <= 0 {
+		lease = 5 * time.Minute
+	}
+	now := time.Now()
+	expires := now.Add(lease)
+	var job MediaMaterializationJob
+	// Let an existing transaction's live context manage its savepoint, even
+	// when the child operation is canceled after the job update. Business SQL
+	// still inherits the child's cancellation through the callback session.
+	if HasContextTransaction(ctx) {
+		conn = DBForContext(ctx)
+	}
+	err = conn.Transaction(func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
+		if err := tx.Where("asset_id = ?", assetID).First(&job).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrMediaJobUnavailable
+			}
+			return err
+		}
+		result := tx.Model(&job).
+			Where("status IN ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", []string{MediaJobPending, MediaJobRunning, MediaJobFailed}, now, now).
+			Where("EXISTS (SELECT 1 FROM media_assets WHERE id = ? AND status IN ?)", assetID, []string{MediaAssetPending, MediaAssetMaterializing, MediaAssetFailed}).
+			Updates(map[string]any{"status": MediaJobRunning, "lease_owner": owner, "lease_expires_at": expires, "attempts": gorm.Expr("attempts + 1"), "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrMediaJobUnavailable
+		}
+		return tx.Model(&MediaAsset{}).Where("id = ?", assetID).
+			Updates(map[string]any{"status": MediaAssetMaterializing, "state_version": gorm.Expr("state_version + 1"), "updated_at": now}).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	job.Status, job.LeaseOwner, job.LeaseExpiresAt = MediaJobRunning, owner, &expires
+	job.Attempts++
+	return &job, nil
+}
+
 func mediaMaterializationOwner(owner string) (string, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {

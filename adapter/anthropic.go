@@ -13,6 +13,7 @@ import (
 
 	"relay-gateway/audit"
 	"relay-gateway/config"
+	"relay-gateway/internal/httpforward"
 	"relay-gateway/model"
 )
 
@@ -76,7 +77,7 @@ func (a *AnthropicAdapter) ChatCompletions(ctx context.Context, channel *config.
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(resp.StatusCode)
 		if _, err := w.Write(converted); err != nil {
-			return &ErrStreamAborted{Err: err}
+			return &ErrStreamAborted{Err: &httpforward.StreamError{Op: "write", Err: err}}
 		}
 		return nil
 	})
@@ -308,7 +309,7 @@ func streamAnthropicAsOpenAI(ctx context.Context, resp *http.Response, fallbackM
 		}
 		data, _ := json.Marshal(chunk)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-			return err
+			return &httpforward.StreamError{Op: "write", Err: err}
 		}
 		if flusher != nil {
 			flusher.Flush()
@@ -379,14 +380,14 @@ func streamAnthropicAsOpenAI(ctx context.Context, resp *http.Response, fallbackM
 				return &ErrStreamAborted{Err: err}
 			}
 		case "error":
-			return &ErrStreamAborted{Err: fmt.Errorf("anthropic stream error: %s", data)}
+			return &ErrStreamAborted{Err: &httpforward.StreamError{Op: "read", Err: fmt.Errorf("anthropic stream error: %s", data)}}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return &ErrStreamAborted{Err: err}
+		return &ErrStreamAborted{Err: &httpforward.StreamError{Op: "read", Err: err}}
 	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return &ErrStreamAborted{Err: err}
+		return &ErrStreamAborted{Err: &httpforward.StreamError{Op: "write", Err: err}}
 	}
 	if flusher != nil {
 		flusher.Flush()

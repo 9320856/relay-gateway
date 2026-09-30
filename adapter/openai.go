@@ -19,6 +19,7 @@ import (
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/internal/httpforward"
+	"relay-gateway/internal/upstreamhttp"
 	"relay-gateway/model"
 )
 
@@ -37,28 +38,14 @@ const (
 	CtxIdempotencyKey CtxKey = "idempotency-key"
 )
 
-var GlobalTransport = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
-	DialContext: (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext,
-	ForceAttemptHTTP2:     true,
-	MaxIdleConns:          1000,
-	MaxIdleConnsPerHost:   200,
-	MaxConnsPerHost:       400,
-	IdleConnTimeout:       90 * time.Second,
-	TLSHandshakeTimeout:   10 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
-	ResponseHeaderTimeout: 180 * time.Second, // 预留 3 分钟思考时间，完美适配 DeepSeek-R1 / o1 / Claude 3.7 深度思考
-}
+var GlobalTransport = upstreamhttp.Transport
 
 // DefaultClientTimeout is an upper bound for a single upstream request.  The
 // transport's ResponseHeaderTimeout protects connection establishment, but it
 // does not limit a stalled response body (for example a video download or an
 // SSE stream).  Keep this generous enough for long-running model requests;
 // callers can still impose a shorter deadline through context.
-const DefaultClientTimeout = 10 * time.Minute
+const DefaultClientTimeout = upstreamhttp.DefaultTimeout
 
 type UpstreamHTTPError struct {
 	StatusCode  int
@@ -145,16 +132,10 @@ func init() {
 
 func NewOpenAIAdapter() *OpenAIAdapter {
 	return &OpenAIAdapter{
-		Client: &http.Client{
+		Client: upstreamhttp.NewClient(&http.Client{
 			Transport: GlobalTransport,
 			Timeout:   DefaultClientTimeout,
-			// API base URLs should be configured at their canonical endpoint.
-			// Refusing redirects prevents credentials and non-idempotent request
-			// bodies from being forwarded or replayed to another location.
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		}),
 	}
 }
 
@@ -249,24 +230,15 @@ func copyHeader(dst http.ResponseWriter, src http.Header) {
 	httpforward.CopyHeaders(dst, src)
 }
 
-var streamBufPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 32*1024)
-		return &buf
-	},
-}
-
 // ForwardStream 使用复用内存缓冲池将流式响应高效推向客户端，大幅减少 GC 开销
 func ForwardStream(ctx context.Context, src io.Reader, dst http.ResponseWriter) error {
 	_, err := httpforward.Stream(ctx, src, dst)
 	return err
 }
 
-// CopyWithPool 使用复用缓冲池进行流数据零堆内存拷贝，避免频繁触发 GC
+// CopyWithPool shares a bounded buffer and retains the source of copy errors.
 func CopyWithPool(dst io.Writer, src io.Reader) (int64, error) {
-	bufPtr := streamBufPool.Get().(*[]byte)
-	defer streamBufPool.Put(bufPtr)
-	return io.CopyBuffer(dst, src, *bufPtr)
+	return httpforward.Copy(context.Background(), src, dst)
 }
 
 // ForwardHTTPRequest 统一的高性能 HTTP 代理转发管线，整合多 Key 容灾轮询、标头剥离与缓冲池无拷贝流式传输
@@ -330,7 +302,7 @@ func (a *OpenAIAdapter) ForwardHTTPRequest(
 			}
 			return nil
 		}
-		if _, err := CopyWithPool(w, resp.Body); err != nil {
+		if _, err := httpforward.Copy(ctx, resp.Body, w); err != nil {
 			return &ErrStreamAborted{Err: err}
 		}
 		return nil
@@ -446,7 +418,7 @@ func (a *OpenAIAdapter) forwardVideoContent(
 		if method == http.MethodHead {
 			return nil
 		}
-		if _, err := CopyWithPool(w, resp.Body); err != nil {
+		if _, err := httpforward.Copy(ctx, resp.Body, w); err != nil {
 			return &ErrStreamAborted{Err: err}
 		}
 		return nil
@@ -535,10 +507,10 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(body, maxUpstreamErrorBodyBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, &httpforward.StreamError{Op: "read", Err: err}
 	}
 	if int64(len(data)) > maxUpstreamErrorBodyBytes {
-		return nil, ErrResponseTooLarge
+		return nil, &httpforward.StreamError{Op: "read", Err: ErrResponseTooLarge}
 	}
 	return data, nil
 }
@@ -552,10 +524,10 @@ func readLimitedResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, &httpforward.StreamError{Op: "read", Err: err}
 	}
 	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("%w: upstream response exceeds %d MiB limit", ErrResponseTooLarge, maxBytes>>20)
+		return nil, &httpforward.StreamError{Op: "read", Err: fmt.Errorf("%w: upstream response exceeds %d MiB limit", ErrResponseTooLarge, maxBytes>>20)}
 	}
 	return data, nil
 }
@@ -706,7 +678,7 @@ func (a *OpenAIAdapter) ExecuteWithKeyRotation(
 		}
 		audit.AddEvent(ctx, "upstream_attempt", audit.EventData{ChannelID: channel.ID, TargetURL: httpReq.URL.String(), Message: "upstream request sent"})
 
-		resp, err := a.Client.Do(httpReq)
+		resp, err := upstreamhttp.NewClient(a.Client).Do(httpReq)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr

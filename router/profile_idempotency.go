@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/db"
@@ -158,44 +159,46 @@ func profileTaskRunCanBeReused(run *db.TaskRun) bool {
 	return run != nil && strings.EqualFold(strings.TrimSpace(run.SubmissionState), "accepted") && strings.TrimSpace(run.ProviderTaskID) != ""
 }
 
-func profileVideoResponseFromTaskRun(run *db.TaskRun) (*model.VideoTaskResponse, error) {
+func profileVideoResponseFromTaskRun(c *gin.Context, run *db.TaskRun) (*model.VideoTaskResponse, error) {
 	if !profileTaskRunCanBeReused(run) {
 		return nil, errors.New("idempotent profile submission is not durably accepted")
 	}
-	var response model.VideoTaskResponse
-	if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &response) == nil {
-		if response.ID == "" {
-			response.ID = run.ProviderTaskID
-		}
-		if response.TaskID == "" {
-			response.TaskID = run.ProviderTaskID
-		}
-		if response.Status == "" {
-			response.Status = normalizeProfileStatus(run.TaskStatus)
-		}
-		return &response, nil
+	lookupID, err := profileReplayTaskID(c.Request.Context(), run)
+	if err != nil {
+		return nil, err
 	}
-	return &model.VideoTaskResponse{ID: run.ProviderTaskID, TaskID: run.ProviderTaskID, Status: normalizeProfileStatus(run.TaskStatus)}, nil
+	if handled, latest := profileRequiredMediaStatus(c, run, asyncTaskKindVideo); handled {
+		run = latest
+	}
+	return profileDurableStatus(c, run, asyncTaskKindVideo, lookupID).(*model.VideoTaskResponse), nil
 }
 
-func profileImageResponseFromTaskRun(run *db.TaskRun) (map[string]any, error) {
+func profileImageResponseFromTaskRun(c *gin.Context, run *db.TaskRun) (map[string]any, error) {
 	if !profileTaskRunCanBeReused(run) {
 		return nil, errors.New("idempotent profile submission is not durably accepted")
 	}
-	var response map[string]any
-	if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &response) == nil {
-		if _, ok := response["id"]; !ok {
-			response["id"] = run.ProviderTaskID
-		}
-		if _, ok := response["task_id"]; !ok {
-			response["task_id"] = run.ProviderTaskID
-		}
-		if _, ok := response["status"]; !ok {
-			response["status"] = normalizeProfileStatus(run.TaskStatus)
-		}
-		return response, nil
+	lookupID, err := profileReplayTaskID(c.Request.Context(), run)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]any{"id": run.ProviderTaskID, "task_id": run.ProviderTaskID, "status": normalizeProfileStatus(run.TaskStatus)}, nil
+	if handled, latest := profileRequiredMediaStatus(c, run, asyncTaskKindImage); handled {
+		run = latest
+	}
+	return profileDurableStatus(c, run, asyncTaskKindImage, lookupID).(map[string]any), nil
+}
+
+// Poll results may contain the provider's colliding ID. The create alias is
+// the public identity returned by the original submit and must survive replay.
+func profileReplayTaskID(ctx context.Context, run *db.TaskRun) (string, error) {
+	var alias db.TaskAlias
+	err := db.DBForContext(ctx).WithContext(ctx).Where("task_run_id = ? AND source = ?", run.ID, "create").Order("id ASC").First(&alias).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return run.ProviderTaskID, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(alias.LookupID, imageTaskIDPrefix), nil
 }
 
 func profileSubmissionErrorState(err error) string {

@@ -14,7 +14,7 @@ func TestBackgroundPollerRenewsLeaseAndStopsOnCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	run := &db.TaskRun{ID: "renewing-poll", TaskKind: "video", Operation: "video.create", ChannelID: "channel", PollingMode: "background", TaskStatus: "processing"}
+	run := &db.TaskRun{ID: "renewing-poll", TaskKind: "video", Operation: "video.create", ChannelID: "channel", ProviderTaskID: "provider-renewing-poll", PollingMode: "background", TaskStatus: "processing"}
 	if err := db.CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}

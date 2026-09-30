@@ -53,7 +53,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			if existing.RequestFingerprint != requestFingerprint {
 				return nil, nil, true, db.ErrTaskIdempotencyConflict
 			}
-			response, responseErr := profileVideoResponseFromTaskRun(existing)
+			response, responseErr := profileVideoResponseFromTaskRun(c, existing)
 			if responseErr != nil {
 				return nil, nil, true, responseErr
 			}
@@ -121,7 +121,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			defer unlock()
 			existing, lookupErr := db.FindProfileTaskRunByIdempotencyContext(c.Request.Context(), callerIdempotencyKey, binding.Operation, requestFingerprint)
 			if lookupErr == nil {
-				response, responseErr := profileVideoResponseFromTaskRun(existing)
+				response, responseErr := profileVideoResponseFromTaskRun(c, existing)
 				unlock()
 				if responseErr != nil {
 					return nil, candidate, true, responseErr
@@ -226,6 +226,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 				return nil, candidate, true, errors.New("persist profile video TaskRun before media materialization")
 			}
 			taskRunID = persistedTaskRunID
+			response.ID, response.TaskID = persistResponse.ID, persistResponse.TaskID
 			if len(result.ResultURLs) > 0 && profileMediaRetentionEnabled(op) && !(retention == protocol.MediaRetentionRequired && op.PollingMode == protocol.PollingGatewayWait) {
 				if _, mediaErr := db.EnsureTaskResultMediaContext(c.Request.Context(), taskRunID, asyncTaskKindVideo, result.ResultURLs); mediaErr != nil {
 					if reservationID != "" {

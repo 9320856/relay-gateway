@@ -2,6 +2,8 @@ package httpforward
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +25,40 @@ func TestCopyHeadersFiltersUpstreamPolicyAndConnectionTokens(t *testing.T) {
 	}
 	if dst.Header().Get("Content-Type") != "text/event-stream" {
 		t.Fatal("missing content type")
+	}
+}
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestCopyPreservesReadAndWriteErrorsWithoutFlushing(t *testing.T) {
+	upstreamErr, downstreamErr := errors.New("upstream failed"), errors.New("downstream failed")
+	for _, tc := range []struct {
+		name string
+		src  io.Reader
+		dst  io.Writer
+		want error
+	}{
+		{"read", failingReader{upstreamErr}, io.Discard, upstreamErr},
+		{"write", strings.NewReader("response"), failingWriter{downstreamErr}, downstreamErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Copy(context.Background(), tc.src, tc.dst)
+			var transfer *StreamError
+			if !errors.As(err, &transfer) || transfer.Op != tc.name || !errors.Is(err, tc.want) {
+				t.Fatalf("copy error=%v, want %s wrapping %v", err, tc.name, tc.want)
+			}
+		})
+	}
+	writer := httptest.NewRecorder()
+	n, err := Copy(context.Background(), strings.NewReader("response"), writer)
+	if err != nil || n != 8 || writer.Flushed || writer.Body.String() != "response" {
+		t.Fatalf("copy n=%d err=%v flushed=%v body=%q", n, err, writer.Flushed, writer.Body.String())
 	}
 }
 

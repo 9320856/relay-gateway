@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"relay-gateway/protocol"
 )
@@ -25,31 +24,28 @@ func (d *Dispatcher) beginProfileAttempt(ctx context.Context, id string) (func(e
 	d.modelsMu.RLock()
 	generation := d.modelGeneration[id]
 	d.modelsMu.RUnlock()
-	if !d.tryAcquireChannel(id) {
+	attempt, acquired := d.tryAcquireChannel(id)
+	if !acquired {
 		return nil, fmt.Errorf("%w: %s", ErrChannelUnavailable, id)
 	}
-	var once sync.Once
 	return func(err error) {
-		once.Do(func() {
-			d.modelsMu.RLock()
-			currentGeneration := d.modelGeneration[id]
-			d.modelsMu.RUnlock()
-			if generation != currentGeneration {
-				return
-			}
-			defer d.releaseHalfOpenProbe(id)
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-				return
-			}
-			if err == nil {
-				d.recordSuccess(id)
-				return
-			}
-			var upstream *protocol.ExecutorError
-			if errors.As(err, &upstream) && upstream.Phase != "write" && (upstream.Phase == "read" || upstream.HTTPStatus == 0 || upstream.HTTPStatus == 408 || upstream.HTTPStatus == 429 || upstream.HTTPStatus >= 500) {
-				d.recordFailure(id)
-			}
-		})
+		d.modelsMu.RLock()
+		currentGeneration := d.modelGeneration[id]
+		d.modelsMu.RUnlock()
+		if generation != currentGeneration || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			attempt.finish(attemptIgnored)
+			return
+		}
+		if err == nil {
+			attempt.finish(attemptSucceeded)
+			return
+		}
+		var upstream *protocol.ExecutorError
+		if errors.As(err, &upstream) && upstream.Phase != "write" && (upstream.Phase == "read" || upstream.HTTPStatus == 0 || upstream.HTTPStatus == 408 || upstream.HTTPStatus == 429 || upstream.HTTPStatus >= 500) {
+			attempt.finish(attemptFailed)
+		} else {
+			attempt.finish(attemptIgnored)
+		}
 	}, nil
 }
 

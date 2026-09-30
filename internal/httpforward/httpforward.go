@@ -48,6 +48,19 @@ func CopyHeaders(dst http.ResponseWriter, src http.Header) {
 // Stream flushes each received block. The caller bounds the reader and owns its
 // close; HTTP request cancellation interrupts a blocked upstream Body.Read.
 func Stream(ctx context.Context, src io.Reader, dst http.ResponseWriter) (int64, error) {
+	return copyResponse(ctx, src, dst, true)
+}
+
+// Copy transfers a non-streaming body without flushing each block. Like Stream,
+// it identifies upstream read errors separately from downstream write errors.
+func Copy(ctx context.Context, src io.Reader, dst io.Writer) (int64, error) {
+	return copyResponse(ctx, src, dst, false)
+}
+
+func copyResponse(ctx context.Context, src io.Reader, dst io.Writer, flush bool) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	b := buffers.Get().(*[]byte)
 	defer buffers.Put(b)
 	var total int64
@@ -68,7 +81,7 @@ func Stream(ctx context.Context, src io.Reader, dst http.ResponseWriter) (int64,
 			if written != n {
 				return total, &StreamError{Op: "write", Err: io.ErrShortWrite}
 			}
-			if flusher, ok := dst.(http.Flusher); ok {
+			if flusher, ok := dst.(http.Flusher); flush && ok {
 				flusher.Flush()
 			}
 		}

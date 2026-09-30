@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"relay-gateway/audit"
 	"relay-gateway/db"
 	relaymedia "relay-gateway/media"
@@ -31,46 +32,126 @@ func materializeProfileVideoURL(c *gin.Context, taskRunID, sourceURL, baseURL st
 // result must be stable before the HTTP response is sent; async/client and
 // background paths use the durable media worker instead.
 func materializeProfileMediaURL(c *gin.Context, taskRunID, kind string, ordinal int, sourceURL, baseURL string) (string, error) {
-	if c == nil || strings.TrimSpace(sourceURL) == "" {
-		return "", errors.New("profile media source URL is required")
+	if ordinal != 0 {
+		return "", errors.New("single profile media source must have ordinal zero")
+	}
+	urls, err := materializeProfileMediaURLs(c, taskRunID, kind, baseURL, []string{sourceURL})
+	if err != nil {
+		return "", err
+	}
+	return urls[0], nil
+}
+
+// Persist the complete result set before any download can complete its task.
+// Claim the first pending asset in that same transaction; later assets may be
+// completed by background workers and are reloaded before a synchronous claim.
+func materializeProfileMediaURLs(c *gin.Context, taskRunID, kind, baseURL string, sourceURLs []string) ([]string, error) {
+	if c == nil || len(sourceURLs) == 0 {
+		return nil, errors.New("profile media sources are required")
 	}
 	if strings.TrimSpace(kind) == "" {
-		return "", errors.New("profile media kind is required")
+		return nil, errors.New("profile media kind is required")
 	}
-	source := relaymedia.NormalizeMediaSource(sourceURL)
-	if source.SourceKind == relaymedia.SourceBase64 && !strings.HasPrefix(strings.ToLower(source.ContentType), strings.ToLower(strings.TrimSpace(kind))+"/") {
-		return "", fmt.Errorf("inline %s media has incompatible content type %q", kind, source.ContentType)
+	for _, raw := range sourceURLs {
+		if strings.TrimSpace(raw) == "" {
+			return nil, errors.New("profile media source URL is required")
+		}
+		source := relaymedia.NormalizeMediaSource(raw)
+		if source.SourceKind == relaymedia.SourceBase64 && !strings.HasPrefix(strings.ToLower(source.ContentType), strings.ToLower(strings.TrimSpace(kind))+"/") {
+			return nil, fmt.Errorf("inline %s media has incompatible content type %q", kind, source.ContentType)
+		}
 	}
-	publicID, capability, capabilityHash, err := db.NewMediaLinkIdentity()
-	if err != nil {
-		return "", err
+	ctx := c.Request.Context()
+	database := db.DBForContext(ctx)
+	if database == nil {
+		return nil, errors.New("profile media database is not initialized")
 	}
-	capabilityCiphertext, err := db.EncryptMediaCapability(capability)
-	if err != nil {
-		return "", err
-	}
-	asset := &db.MediaAsset{PublicID: publicID, CapabilityHash: capabilityHash, CapabilityCiphertext: capabilityCiphertext, TaskRunID: strings.TrimSpace(taskRunID), OriginRequestID: audit.RequestID(c.Request.Context()), Kind: strings.TrimSpace(kind), Ordinal: ordinal, Status: db.MediaAssetPending, SourceKind: source.SourceKind, SourceLocator: source.Locator, ContentType: source.ContentType}
 	const lease = 5 * time.Minute
-	job, err := db.CreateMediaAssetForMaterializationContext(c.Request.Context(), asset, "profile-sync", lease)
+	var assets []db.MediaAsset
+	var firstJob *db.MediaMaterializationJob
+	firstIndex := -1
+	err := database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txCtx := db.WithTx(ctx, tx)
+		var err error
+		assets, err = db.EnsureTaskResultMediaContext(txCtx, taskRunID, kind, sourceURLs)
+		if err != nil {
+			return err
+		}
+		for index, asset := range assets {
+			if asset.Kind != kind {
+				return errors.New("profile media asset kind conflicts with its result")
+			}
+			if asset.OriginRequestID == "" {
+				if err := tx.Model(&asset).Update("origin_request_id", audit.RequestID(ctx)).Error; err != nil {
+					return err
+				}
+			}
+			if firstIndex < 0 && (asset.Status != db.MediaAssetAvailable || asset.ObjectID == "") {
+				firstJob, err = db.ClaimMediaAssetMaterializationContext(txCtx, asset.ID, "profile-sync", lease)
+				if err != nil {
+					return err
+				}
+				firstIndex = index
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	fail := func(cause error) (string, error) {
-		_ = db.FailMediaMaterializationWithAssetForLeaseContext(context.Background(), job, cause.Error(), time.Now().Add(15*time.Second))
-		return "", cause
+	pendingFirst := firstJob
+	defer func() {
+		if pendingFirst != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = db.FailMediaMaterializationWithAssetForLeaseContext(cleanupCtx, pendingFirst, "synchronous media materialization interrupted", time.Now().Add(15*time.Second))
+		}
+	}()
+	managed := make([]string, 0, len(assets))
+	for index := range assets {
+		asset, err := db.GetMediaAssetByIDContext(ctx, assets[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		if asset.Status != db.MediaAssetAvailable || asset.ObjectID == "" {
+			job := firstJob
+			if index != firstIndex {
+				job, err = db.ClaimMediaAssetMaterializationContext(ctx, asset.ID, "profile-sync", lease)
+				if err != nil {
+					return nil, err
+				}
+			}
+			fail := func(cause error) ([]string, error) {
+				if index == firstIndex {
+					pendingFirst = nil
+				}
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = db.FailMediaMaterializationWithAssetForLeaseContext(cleanupCtx, job, cause.Error(), time.Now().Add(15*time.Second))
+				return nil, cause
+			}
+			store, storeErr := getMediaObjectStore()
+			if storeErr != nil {
+				return fail(storeErr)
+			}
+			fetcher := newProfileMediaSourceFetcher(sourceURLs[asset.Ordinal], baseURL)
+			if asset.SourceKind == relaymedia.SourceBase64 {
+				fetcher = relaymedia.InlineSourceFetcher{}
+			}
+			if _, err := task.MaterializeClaimedMedia(ctx, job, asset, store, fetcher, lease); err != nil {
+				return fail(err)
+			}
+			if index == firstIndex {
+				pendingFirst = nil
+			}
+		}
+		capability, err := db.RecoverMediaAssetCapability(asset)
+		if err != nil {
+			return nil, err
+		}
+		managed = append(managed, mediaPublicURL(c, asset.PublicID, capability))
 	}
-	store, err := getMediaObjectStore()
-	if err != nil {
-		return fail(err)
-	}
-	fetcher := newProfileMediaSourceFetcher(sourceURL, baseURL)
-	if source.SourceKind == relaymedia.SourceBase64 {
-		fetcher = relaymedia.InlineSourceFetcher{}
-	}
-	if _, err := task.MaterializeClaimedMedia(c.Request.Context(), job, asset, store, fetcher, lease); err != nil {
-		return fail(err)
-	}
-	return mediaPublicURL(c, publicID, capability), nil
+	return managed, nil
 }
 
 // Keep the synchronous path on the same strict HTTP fetcher as background
@@ -98,13 +179,14 @@ func materializeProfileImageResponse(c *gin.Context, taskRunID, baseURL string, 
 	if response == nil || len(sourceURLs) == 0 {
 		return nil
 	}
+	stableURLs, err := materializeProfileMediaURLs(c, taskRunID, "image", baseURL, sourceURLs)
+	if err != nil {
+		return err
+	}
 	replacements := make(map[string]string, len(sourceURLs))
 	managedData := make([]map[string]string, 0, len(sourceURLs))
 	for ordinal, sourceURL := range sourceURLs {
-		stableURL, err := materializeProfileMediaURL(c, taskRunID, "image", ordinal, sourceURL, baseURL)
-		if err != nil {
-			return err
-		}
+		stableURL := stableURLs[ordinal]
 		replacements[sourceURL] = stableURL
 		managedData = append(managedData, map[string]string{"url": stableURL})
 	}

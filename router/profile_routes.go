@@ -294,7 +294,7 @@ func generateProfileID() (string, error) {
 // importing a draft; otherwise the profile's latest revision is incremented.
 func handleCreateProtocolProfileRevision(c *gin.Context) {
 	profileID := strings.TrimSpace(c.Param("id"))
-	profile, err := db.GetProtocolProfileContext(c.Request.Context(), profileID)
+	_, err := db.GetProtocolProfileContext(c.Request.Context(), profileID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.Status(http.StatusNotFound)
 		return
@@ -314,13 +314,14 @@ func handleCreateProtocolProfileRevision(c *gin.Context) {
 		return
 	}
 	revision := input.Revision
-	if revision <= 0 {
-		revision = profile.LatestRevision + 1
-	}
 	rev := &db.ProtocolProfileRevision{ProfileID: profileID, Revision: revision, SchemaVersion: compiled.Profile().SchemaVersion, ContentJSON: string(compiled.CanonicalJSON()), ContentDigest: compiled.Digest(), State: db.ProfileRevisionDraft}
-	if err := db.SaveProtocolProfileRevisionContext(c.Request.Context(), rev); err != nil {
-		if errors.Is(err, db.ErrPublishedRevisionImmutable) || errors.Is(err, db.ErrRetiredRevisionImmutable) || strings.Contains(strings.ToLower(err.Error()), "unique") {
+	if err := db.CreateProtocolProfileRevisionContext(c.Request.Context(), rev); err != nil {
+		if errors.Is(err, db.ErrProfileRevisionConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "版本已存在或不可修改"})
+			return
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.Status(http.StatusNotFound)
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建 Profile 版本失败"})

@@ -2,16 +2,19 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"path"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,6 +22,7 @@ import (
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/db"
+	"relay-gateway/internal/httpforward"
 	"relay-gateway/model"
 	"relay-gateway/protocol"
 )
@@ -29,6 +33,57 @@ type breakerState struct {
 	lastFailure   time.Time
 	cooldownUntil time.Time
 	halfOpen      bool
+	epoch         uint64
+	probeID       uint64
+}
+
+type attemptOutcome uint8
+
+const (
+	attemptIgnored attemptOutcome = iota
+	attemptSucceeded
+	attemptFailed
+)
+
+// A lease belongs to the breaker cycle in which the request started. Older
+// requests cannot close a newly opened circuit or release another probe.
+type channelAttempt struct {
+	state     *breakerState
+	channelID string
+	epoch     uint64
+	probeID   uint64
+	once      sync.Once
+}
+
+func (a *channelAttempt) finish(outcome attemptOutcome) {
+	a.once.Do(func() {
+		st := a.state
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if st.epoch != a.epoch || a.probeID != 0 && (!st.halfOpen || st.probeID != a.probeID) {
+			return
+		}
+		switch outcome {
+		case attemptSucceeded:
+			st.failCount = 0
+			st.cooldownUntil = time.Time{}
+			st.halfOpen = false
+			if a.probeID != 0 {
+				st.epoch++
+			}
+		case attemptFailed:
+			st.recordFailureLocked(a.channelID, a.probeID != 0)
+		default:
+			if a.probeID != 0 {
+				st.halfOpen = false
+			}
+		}
+	})
+}
+
+type schedulingPool struct {
+	nextIndex uint64
+	lastUsed  uint64
 }
 
 type RetryPolicy int
@@ -49,7 +104,9 @@ type Dispatcher struct {
 	remoteModels    map[string][]string // channelID -> []modelName
 	modelGeneration map[string]uint64   // channelID -> configuration generation
 	breakers        sync.Map            // channelID (string) -> *breakerState (细粒度独立分段锁，零并发竞争)
-	rrCounter       atomic.Uint64
+	schedulingMu    sync.Mutex
+	schedulingPools map[[32]byte]*schedulingPool
+	schedulingClock uint64
 	syncMu          sync.Mutex
 	syncing         bool
 	syncPending     bool
@@ -61,6 +118,10 @@ type Dispatcher struct {
 // containing hundreds of channels creates the same number of simultaneous
 // /models requests and SQLite health writes.
 const maxConcurrentModelSync = 8
+
+// Candidate sets, rather than caller-controlled model names, identify pools.
+// The cap also bounds the number of combinations retained during churn.
+const maxSchedulingPools = 1024
 
 var DefaultDispatcher = &Dispatcher{
 	remoteModels: make(map[string][]string),
@@ -97,6 +158,7 @@ func (d *Dispatcher) ResetBreaker(channelID string) {
 	st.cooldownUntil = time.Time{}
 	st.lastFailure = time.Time{}
 	st.halfOpen = false
+	st.epoch++
 	st.mu.Unlock()
 }
 
@@ -113,6 +175,7 @@ func (d *Dispatcher) InvalidateChannel(channelID string) {
 	}
 	d.modelGeneration[channelID]++
 	d.modelsMu.Unlock()
+	d.clearSchedulingPools()
 }
 
 func matchPattern(pattern, name string) bool {
@@ -143,9 +206,9 @@ func (d *Dispatcher) getActiveChannels() []config.UpstreamChannel {
 	return db.GetActiveUpstreamChannels()
 }
 
-// isAvailable 检查渠道是否处于熔断冷却中 (无锁高并发安全)
+// isAvailable checks availability without reserving a half-open probe.
 func (d *Dispatcher) isAvailable(channelID string) bool {
-	return d.tryAcquireChannel(channelID)
+	return d.candidateAvailable(channelID)
 }
 
 // candidateAvailable is a read-only breaker check used while constructing a
@@ -170,62 +233,25 @@ func (d *Dispatcher) candidateAvailable(channelID string) bool {
 	return !st.halfOpen
 }
 
-func (d *Dispatcher) tryAcquireChannel(channelID string) bool {
-	val, ok := d.breakers.Load(channelID)
-	if !ok {
-		return true
-	}
-	st := val.(*breakerState)
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	now := time.Now()
-	if st.cooldownUntil.IsZero() {
-		return true
-	}
-	if now.Before(st.cooldownUntil) || st.halfOpen {
-		return false
-	}
-	st.halfOpen = true
-	return true
-}
-
-// releaseHalfOpenProbe is a safety net for every return path after a
-// half-open slot has been acquired. Normal success/failure recording also
-// clears the slot, but validation errors, cancellation and non-retryable
-// provider responses must not leave a channel permanently stuck.
-func (d *Dispatcher) releaseHalfOpenProbe(channelID string) {
-	val, ok := d.breakers.Load(channelID)
-	if !ok {
-		return
-	}
-	st := val.(*breakerState)
-	st.mu.Lock()
-	if st.halfOpen {
-		st.halfOpen = false
-	}
-	st.mu.Unlock()
-}
-
-// recordSuccess 记录渠道调用成功，复位熔断计数 (独立通道锁，不阻塞全局调度)
-func (d *Dispatcher) recordSuccess(channelID string) {
-	val, ok := d.breakers.Load(channelID)
-	if !ok {
-		return
-	}
-	st := val.(*breakerState)
-	st.mu.Lock()
-	st.failCount = 0
-	st.cooldownUntil = time.Time{}
-	st.halfOpen = false
-	st.mu.Unlock()
-}
-
-// recordFailure 记录渠道调用失败，连续 3 次失败触发 30 秒熔断保护（带 1 分钟滑动窗口衰减，独立通道锁）
-func (d *Dispatcher) recordFailure(channelID string) {
+func (d *Dispatcher) tryAcquireChannel(channelID string) (*channelAttempt, bool) {
 	st := d.GetBreaker(channelID)
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	lease := &channelAttempt{state: st, channelID: channelID, epoch: st.epoch}
+	now := time.Now()
+	if st.cooldownUntil.IsZero() {
+		return lease, true
+	}
+	if now.Before(st.cooldownUntil) || st.halfOpen {
+		return nil, false
+	}
+	st.halfOpen = true
+	st.probeID++
+	lease.probeID = st.probeID
+	return lease, true
+}
 
+func (st *breakerState) recordFailureLocked(channelID string, failedProbe bool) {
 	now := time.Now()
 	// 滑动窗口衰减：若距离上次失败已超过 1 分钟，重置连续失败计数
 	if !st.lastFailure.IsZero() && now.Sub(st.lastFailure) > 1*time.Minute {
@@ -235,10 +261,66 @@ func (d *Dispatcher) recordFailure(channelID string) {
 	st.failCount++
 	st.halfOpen = false
 
-	if st.failCount >= 3 {
+	if failedProbe || st.failCount >= 3 {
 		st.cooldownUntil = now.Add(30 * time.Second)
+		st.epoch++
 		log.Printf("[CircuitBreaker] Channel [%s] entered 30s cooldown due to %d consecutive failures", channelID, st.failCount)
 	}
+}
+
+func (d *Dispatcher) clearSchedulingPools() {
+	d.schedulingMu.Lock()
+	d.schedulingPools = nil
+	d.schedulingClock = 0
+	d.schedulingMu.Unlock()
+}
+
+func (d *Dispatcher) nextSchedulingIndex(channels []*config.UpstreamChannel) uint64 {
+	if len(channels) < 2 {
+		return 0
+	}
+	hash := sha256.New()
+	var encoded [8]byte
+	for _, ch := range channels {
+		binary.LittleEndian.PutUint64(encoded[:], uint64(len(ch.ID)))
+		_, _ = hash.Write(encoded[:])
+		_, _ = hash.Write([]byte(ch.ID))
+		weight := ch.Weight
+		if weight <= 0 {
+			weight = 1
+		} else if weight > 100 {
+			weight = 100
+		}
+		binary.LittleEndian.PutUint64(encoded[:], uint64(weight))
+		_, _ = hash.Write(encoded[:])
+	}
+	var key [32]byte
+	hash.Sum(key[:0])
+	d.schedulingMu.Lock()
+	defer d.schedulingMu.Unlock()
+	if d.schedulingPools == nil {
+		d.schedulingPools = make(map[[32]byte]*schedulingPool)
+	}
+	pool := d.schedulingPools[key]
+	if pool == nil {
+		if len(d.schedulingPools) >= maxSchedulingPools {
+			var oldest [32]byte
+			oldestUse := ^uint64(0)
+			for candidateKey, candidate := range d.schedulingPools {
+				if candidate.lastUsed < oldestUse {
+					oldest, oldestUse = candidateKey, candidate.lastUsed
+				}
+			}
+			delete(d.schedulingPools, oldest)
+		}
+		pool = &schedulingPool{}
+		d.schedulingPools[key] = pool
+	}
+	d.schedulingClock++
+	pool.lastUsed = d.schedulingClock
+	index := pool.nextIndex
+	pool.nextIndex++
+	return index
 }
 
 // RemoveChannel 从调度器内存中清理已删除渠道的动态模型映射、熔断计数与 Key 轮询器
@@ -384,7 +466,7 @@ func (d *Dispatcher) syncRemoteModelsOnce(ctx context.Context) {
 			if acquireErr != nil {
 				return
 			}
-			defer d.releaseHalfOpenProbe(channel.ID)
+			defer finish(context.Canceled)
 
 			start := time.Now()
 			models, err := protocol.DiscoverModels(fetchCtx, channel.BaseURL, channel.GetEffectiveKeys(), channel.Headers, protocol.ProfileModelDefaults(channel.Type))
@@ -685,9 +767,6 @@ func (d *Dispatcher) orderCandidatePool(eligible []config.UpstreamChannel, model
 	sort.Ints(priorities)
 
 	var finalOrdered []*config.UpstreamChannel
-	// 采样请求级别的轮询基准索引（单次自增采样，杜绝跨优先级循环重复累加导致的偶数步长死锁与节点饥饿）
-	rrIndex := d.rrCounter.Add(1) - 1
-
 	// 依次处理各个优先级组
 	for _, p := range priorities {
 		group := priorityGroups[p]
@@ -705,7 +784,7 @@ func (d *Dispatcher) orderCandidatePool(eligible []config.UpstreamChannel, model
 
 		// 如果健康节点存在，优先采用 Smooth Weighted Round Robin 加权轮询
 		if len(healthy) > 0 {
-			finalOrdered = append(finalOrdered, scheduleHealthyChannels(healthy, rrIndex)...)
+			finalOrdered = append(finalOrdered, scheduleHealthyChannels(healthy, d.nextSchedulingIndex(healthy))...)
 		}
 
 	}
@@ -747,6 +826,9 @@ func (d *Dispatcher) ExecuteWithPolicy(
 	canRetry func() bool,
 	fn func(channel *config.UpstreamChannel, adp adapter.Adapter) error,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	candidates, err := d.ResolveCandidatesForProtocol(modelName, protocol)
 	if err != nil {
 		return err
@@ -765,11 +847,12 @@ func (d *Dispatcher) ExecuteWithPolicy(
 	}
 
 	for i, ch := range candidates {
-		if !d.tryAcquireChannel(ch.ID) {
+		attempt, acquired := d.tryAcquireChannel(ch.ID)
+		if !acquired {
 			lastErr = fmt.Errorf("upstream channel %s is cooling down or already has a half-open probe", ch.ID)
 			continue
 		}
-		defer d.releaseHalfOpenProbe(ch.ID)
+		defer attempt.finish(attemptIgnored)
 		adp := adapter.Get(ch.Type)
 		if adp == nil {
 			lastErr = fmt.Errorf("adapter not found for channel %s (type: %s)", ch.ID, ch.Type)
@@ -788,13 +871,22 @@ func (d *Dispatcher) ExecuteWithPolicy(
 
 		err := fn(ch, adp)
 		if err == nil {
-			d.recordSuccess(ch.ID)
+			attempt.finish(attemptSucceeded)
 			return nil
 		}
 
 		// 若错误是由于客户端主动取消或客户端超时引起，绝不误判为上游节点故障，且不再重试后续渠道
 		if ctx.Err() != nil {
+			attempt.finish(attemptIgnored)
 			return err
+		}
+		// Health feedback is independent of whether this particular request can
+		// be replayed. An uncertain inference fails once, but future requests
+		// still need to bypass a repeatedly failing channel.
+		if legacyFailureCounts(err, policy) {
+			attempt.finish(attemptFailed)
+		} else {
+			attempt.finish(attemptIgnored)
 		}
 		// A syntactically valid request rejected by the provider (400/422)
 		// should be returned to the client instead of being replayed against
@@ -805,7 +897,6 @@ func (d *Dispatcher) ExecuteWithPolicy(
 		}
 
 		lastErr = err
-		d.recordFailure(ch.ID)
 
 		if auditEntry != nil && i < len(candidates)-1 {
 			auditEntry.RecordFailover(fmt.Sprintf("Channel [%s] (%s) failed: %v, trying next [%s]", ch.ID, ch.Type, err, candidates[i+1].ID))
@@ -822,6 +913,34 @@ func (d *Dispatcher) ExecuteWithPolicy(
 		}
 	}
 	return lastErr
+}
+
+func legacyFailureCounts(err error, policy RetryPolicy) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var streamErr *httpforward.StreamError
+	if errors.As(err, &streamErr) {
+		return streamErr.Op == "read"
+	}
+	var aborted *adapter.ErrStreamAborted
+	if errors.As(err, &aborted) {
+		// Old adapters may return unclassified transfer errors. Only an explicit
+		// upstream read failure establishes unhealthy upstream behavior.
+		return errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	var upstream *adapter.UpstreamHTTPError
+	if errors.As(err, &upstream) {
+		status := upstream.StatusCode
+		return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 ||
+			status == http.StatusUnauthorized || status == http.StatusForbidden ||
+			status == http.StatusNotFound || status == http.StatusMethodNotAllowed
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return true
+	}
+	return policy == RetrySafeRead
 }
 
 func isFailoverEligibleForPolicy(err error, policy RetryPolicy) bool {

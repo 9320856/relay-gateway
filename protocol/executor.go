@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"relay-gateway/internal/httpforward"
+	"relay-gateway/internal/upstreamhttp"
 )
 
 var (
@@ -110,7 +111,7 @@ func (e *HTTPExecutor) ExecuteRaw(ctx context.Context, profile CompiledProfile, 
 			continue
 		}
 		result := Result{HTTPStatus: resp.StatusCode, Headers: resp.Header.Clone()}
-		if resp.StatusCode >= 400 {
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			result.RawBody, err = io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBytes(req)+1))
 			_ = resp.Body.Close()
 			if err != nil {
@@ -211,7 +212,7 @@ func NewHTTPExecutor(client *http.Client) *HTTPExecutor {
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &HTTPExecutor{Client: client, MaxResponseBytes: 8 << 20}
+	return &HTTPExecutor{Client: upstreamhttp.NewClient(client), MaxResponseBytes: 8 << 20}
 }
 
 func (e *HTTPExecutor) Submit(ctx context.Context, profile CompiledProfile, operation string, req Request) (Result, error) {
@@ -446,7 +447,7 @@ func (e *HTTPExecutor) doJSON(ctx context.Context, method, path string, req Requ
 			lastExecutorErr = executorErrorWithResponse(phase, resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), false, true, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 			continue
 		}
-		if resp.StatusCode >= 400 {
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return result, executorErrorWithResponse(phase, resp.StatusCode, resp.Header.Get("Content-Type"), string(result.RawBody), resp.Header.Get("Retry-After"), mutatingMethod(method) && resp.StatusCode >= 500, false, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		}
 		return result, nil
@@ -503,9 +504,9 @@ func (e *HTTPExecutor) newRequest(ctx context.Context, method, path string, req 
 
 func (e *HTTPExecutor) client() *http.Client {
 	if e != nil && e.Client != nil {
-		return e.Client
+		return upstreamhttp.NewClient(e.Client)
 	}
-	return http.DefaultClient
+	return upstreamhttp.NewClient(&http.Client{Timeout: 60 * time.Second})
 }
 
 func (e *HTTPExecutor) maxResponseBytes(req Request) int64 {

@@ -16,7 +16,7 @@ func TestSameOwnerTaskReclaimFencesEveryOldAttemptMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = Close() })
-			run := &TaskRun{ID: "same-owner", TaskKind: "video", Operation: "video.create", ChannelID: "channel", PollingMode: mode, TaskStatus: "processing"}
+			run := &TaskRun{ID: "same-owner", TaskKind: "video", Operation: "video.create", ChannelID: "channel", ProviderTaskID: "provider-same-owner", PollingMode: mode, TaskStatus: "processing"}
 			if err := CreateTaskRun(run); err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +72,7 @@ func TestTaskLeaseCallbackRollsBackRelatedWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = Close() })
-	run := &TaskRun{ID: "atomic-poll", TaskKind: "video", Operation: "video.create", ChannelID: "channel", PollingMode: "background", TaskStatus: "processing"}
+	run := &TaskRun{ID: "atomic-poll", TaskKind: "video", Operation: "video.create", ChannelID: "channel", ProviderTaskID: "provider-atomic-poll", PollingMode: "background", TaskStatus: "processing"}
 	if err := CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestTaskLeaseFenceCanceledNestedOperationCannotLeakIntoOwnerCommit(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = Close() })
-	run := &TaskRun{ID: "nested-budget", TaskKind: "video", Operation: "video.create", ChannelID: "channel", PollingMode: "background", TaskStatus: "processing"}
+	run := &TaskRun{ID: "nested-budget", TaskKind: "video", Operation: "video.create", ChannelID: "channel", ProviderTaskID: "provider-nested-budget", PollingMode: "background", TaskStatus: "processing"}
 	if err := CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}

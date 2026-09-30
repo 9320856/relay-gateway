@@ -696,6 +696,11 @@ func ClaimDueTaskRun(owner string, lease time.Duration) (*TaskRun, error) {
 	return ClaimDueTaskRunContext(context.Background(), owner, lease)
 }
 
+// Older task rows may have no submission state, but an existing provider ID
+// proves they were accepted. Explicit reservation/unknown/rejected states must
+// never enter the polling queue, even if they happen to contain an ID.
+const backgroundTaskAcceptedSQL = "(submission_state = ? OR submission_state = '' OR submission_state IS NULL) AND provider_task_id IS NOT NULL AND TRIM(provider_task_id) <> ''"
+
 func ClaimDueTaskRunContext(ctx context.Context, owner string, lease time.Duration) (*TaskRun, error) {
 	db, err := taskDB(ctx)
 	if err != nil {
@@ -713,6 +718,7 @@ func ClaimDueTaskRunContext(ctx context.Context, owner string, lease time.Durati
 	var claimed TaskRun
 	err = db.Transaction(func(tx *gorm.DB) error {
 		result := tx.Where("polling_mode = ? AND task_status NOT IN ? AND (next_poll_at IS NULL OR next_poll_at <= ?) AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", "background", nonPollableStatuses, now, now).
+			Where(backgroundTaskAcceptedSQL, "accepted").
 			Order("COALESCE(next_poll_at, created_at) ASC, created_at ASC").First(&claimed)
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return ErrTaskLeaseUnavailable
@@ -722,6 +728,7 @@ func ClaimDueTaskRunContext(ctx context.Context, owner string, lease time.Durati
 		}
 		expires := now.Add(lease)
 		result = tx.Model(&claimed).Where("id = ? AND polling_mode = ? AND task_status NOT IN ? AND (next_poll_at IS NULL OR next_poll_at <= ?) AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", claimed.ID, "background", nonPollableStatuses, now, now).
+			Where(backgroundTaskAcceptedSQL, "accepted").
 			Updates(map[string]any{"lease_owner": owner, "lease_expires_at": expires, "state_version": claimed.StateVersion + 1, "updated_at": now})
 		if result.Error != nil {
 			return result.Error

@@ -114,7 +114,6 @@ func TestDispatcherRoundRobin(t *testing.T) {
 func TestDispatcherFailover(t *testing.T) {
 	DefaultDispatcher.RemoveChannel("sub2api-node-broken")
 	DefaultDispatcher.RemoveChannel("sub2api-node-healthy")
-	DefaultDispatcher.rrCounter.Store(0)
 	t.Cleanup(func() {
 		DefaultDispatcher.RemoveChannel("sub2api-node-broken")
 		DefaultDispatcher.RemoveChannel("sub2api-node-healthy")
@@ -697,8 +696,13 @@ func TestCircuitBreakerSlidingWindowDecay(t *testing.T) {
 		t.Errorf("channel should be in cooldown after 3 rapid consecutive failures")
 	}
 
-	// 5. 成功一次，应彻底复位熔断状态
-	DefaultDispatcher.recordSuccess(chanID)
+	// 5. 冷却结束后的一次探测成功，应彻底复位熔断状态
+	expireRegressionCooldown(DefaultDispatcher, chanID)
+	probe, acquired := DefaultDispatcher.tryAcquireChannel(chanID)
+	if !acquired {
+		t.Fatal("expected a half-open probe after cooldown")
+	}
+	probe.finish(attemptSucceeded)
 	if !DefaultDispatcher.isAvailable(chanID) {
 		t.Errorf("channel should be available after recordSuccess")
 	}
@@ -863,14 +867,15 @@ func TestHalfOpenAllowsOnlyOneProbe(t *testing.T) {
 	state.cooldownUntil = time.Now().Add(-time.Second)
 	state.halfOpen = false
 	state.mu.Unlock()
-	if !dispatcher.tryAcquireChannel("half-open-channel") {
+	probe, acquired := dispatcher.tryAcquireChannel("half-open-channel")
+	if !acquired {
 		t.Fatal("first request should acquire half-open probe")
 	}
-	if dispatcher.tryAcquireChannel("half-open-channel") {
+	if _, acquired := dispatcher.tryAcquireChannel("half-open-channel"); acquired {
 		t.Fatal("second request must not acquire the same half-open probe")
 	}
-	dispatcher.recordSuccess("half-open-channel")
-	if !dispatcher.tryAcquireChannel("half-open-channel") {
+	probe.finish(attemptSucceeded)
+	if _, acquired := dispatcher.tryAcquireChannel("half-open-channel"); !acquired {
 		t.Fatal("channel should be available after successful probe")
 	}
 }

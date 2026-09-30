@@ -138,7 +138,7 @@ func TestTaskLeaseTakeoverRejectsStalePollUpdates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = Close() })
 	now := time.Now()
-	if err := CreateTaskRun(&TaskRun{ID: "lease-run", TaskKind: "video", Operation: "video.create", ChannelID: "c", PollingMode: "background", NextPollAt: &now}); err != nil {
+	if err := CreateTaskRun(&TaskRun{ID: "lease-run", TaskKind: "video", Operation: "video.create", ChannelID: "c", ProviderTaskID: "provider-lease-run", PollingMode: "background", NextPollAt: &now}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := ClaimDueTaskRun("worker-a", time.Millisecond)

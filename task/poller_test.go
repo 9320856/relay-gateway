@@ -15,7 +15,7 @@ func TestBackgroundPollerClaimsAndReschedulesWithoutSubmit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now()
-	run := &db.TaskRun{ID: "background-run", TaskKind: "video", Operation: "video.create", ChannelID: "channel", PollingMode: "background", TaskStatus: "queued", NextPollAt: &now}
+	run := &db.TaskRun{ID: "background-run", TaskKind: "video", Operation: "video.create", ChannelID: "channel", ProviderTaskID: "provider-background-run", PollingMode: "background", TaskStatus: "queued", NextPollAt: &now}
 	if err := db.CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestBackgroundPollerDoesNotRepollMaterializingTask(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now().Add(-time.Second)
-	run := &db.TaskRun{ID: "materializing-run", TaskKind: "image", Operation: "images.create", ChannelID: "channel", PollingMode: "background", TaskStatus: "materializing", TaskOutcome: "pending", NextPollAt: &now}
+	run := &db.TaskRun{ID: "materializing-run", TaskKind: "image", Operation: "images.create", ChannelID: "channel", ProviderTaskID: "provider-materializing-run", PollingMode: "background", TaskStatus: "materializing", TaskOutcome: "pending", NextPollAt: &now}
 	if err := db.CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestBackgroundPollerCancellationIsRecordedAndRescheduled(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now()
-	run := &db.TaskRun{ID: "cancel-run", TaskKind: "video", Operation: "video.create", ChannelID: "c", PollingMode: "background", NextPollAt: &now}
+	run := &db.TaskRun{ID: "cancel-run", TaskKind: "video", Operation: "video.create", ChannelID: "c", ProviderTaskID: "provider-cancel-run", PollingMode: "background", NextPollAt: &now}
 	if err := db.CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestBackgroundPollerCanceledBeforeClaimDoesNotPollOrMutate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	now := time.Now()
-	run := &db.TaskRun{ID: "cancel-before-claim", TaskKind: "video", Operation: "video.create", ChannelID: "c", PollingMode: "background", NextPollAt: &now}
+	run := &db.TaskRun{ID: "cancel-before-claim", TaskKind: "video", Operation: "video.create", ChannelID: "c", ProviderTaskID: "provider-cancel-before-claim", PollingMode: "background", NextPollAt: &now}
 	if err := db.CreateTaskRun(run); err != nil {
 		t.Fatal(err)
 	}

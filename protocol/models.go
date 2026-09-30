@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"relay-gateway/internal/upstreamhttp"
 )
 
 const maxModelDiscoveryResponse = 16 << 20
@@ -30,7 +32,7 @@ func DiscoverModels(ctx context.Context, baseURL string, apiKeys []string, heade
 	endpoint := *base
 	endpoint.Path = strings.TrimRight(base.Path, "/") + "/models"
 	endpoint.RawPath = ""
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := upstreamhttp.NewClient(&http.Client{Timeout: 15 * time.Second})
 	keys := normalizedKeys(apiKeys)
 	if len(keys) == 0 {
 		keys = []string{""}

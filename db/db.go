@@ -312,11 +312,16 @@ func InitDB(dbPath string) (err error) {
 	// Empty worker queues legitimately return gorm.ErrRecordNotFound on each
 	// poll; keep those expected misses out of the runtime log while preserving
 	// warnings and errors for actual database failures.
-	opened, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: logger.New(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
+	sqlPool, connector, err := openSQLitePool(dbPath)
+	if err != nil {
+		return err
+	}
+	opened, err := gorm.Open(sqlite.Dialector{Conn: sqlPool}, &gorm.Config{Logger: logger.New(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
 		LogLevel:                  logger.Warn,
 		IgnoreRecordNotFoundError: true,
 	})})
 	if err != nil {
+		_ = sqlPool.Close()
 		return err
 	}
 	initialized := false
@@ -334,7 +339,12 @@ func InitDB(dbPath string) (err error) {
 	if err := validateSchema(opened); err != nil {
 		return err
 	}
-	for _, pragma := range []string{"PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000", "PRAGMA synchronous = NORMAL", "PRAGMA foreign_keys = ON"} {
+	// Enable connection initialization only after schema validation. The
+	// current connection is configured below; future connections receive the
+	// same settings before entering the pool, including replacements after a
+	// lifetime expiry or cancellation.
+	connector.configure.Store(true)
+	for _, pragma := range sqliteConnectionPragmas {
 		if err := opened.Exec(pragma).Error; err != nil {
 			return fmt.Errorf("apply SQLite setting %q: %w", pragma, err)
 		}

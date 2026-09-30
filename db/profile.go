@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
 	ErrPublishedRevisionImmutable = errors.New("published profile revision is immutable")
 	ErrRetiredRevisionImmutable   = errors.New("retired profile revision is immutable")
+	ErrProfileRevisionConflict    = errors.New("profile revision already exists")
 	ErrRevisionHasBindings        = errors.New("profile revision still has channel bindings")
 	ErrRevisionHasActiveTasks     = errors.New("profile revision still has active task runs")
 	ErrRevisionHasActiveBindings  = errors.New("profile revision still has enabled channel bindings")
@@ -125,6 +127,9 @@ func CreateProtocolProfileContext(ctx context.Context, p *ProtocolProfile) error
 // configured or bound, so exposing one after a failed second write leaves the
 // management API in a misleading state.
 func CreateProtocolProfileWithInitialRevisionContext(ctx context.Context, p *ProtocolProfile, r *ProtocolProfileRevision) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	database, err := profileDB(ctx)
 	if err != nil {
 		return err
@@ -133,16 +138,17 @@ func CreateProtocolProfileWithInitialRevisionContext(ctx context.Context, p *Pro
 		return errors.New("profile and initial revision must have the same identity")
 	}
 	create := func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
 		txCtx := WithTx(ctx, tx)
 		if err := CreateProtocolProfileContext(txCtx, p); err != nil {
 			return err
 		}
-		return SaveProtocolProfileRevisionContext(txCtx, r)
+		return CreateProtocolProfileRevisionContext(txCtx, r)
 	}
-	if !HasContextTransaction(ctx) {
-		return database.Transaction(create)
+	if HasContextTransaction(ctx) {
+		database = DBForContext(ctx)
 	}
-	return create(database)
+	return database.Transaction(create)
 }
 
 func GetProtocolProfile(id string) (*ProtocolProfile, error) {
@@ -159,6 +165,75 @@ func GetProtocolProfileContext(ctx context.Context, id string) (*ProtocolProfile
 		return nil, err
 	}
 	return &p, nil
+}
+
+// CreateProtocolProfileRevisionContext only inserts a draft. A non-positive
+// Revision allocates the next number inside the same transaction as the insert.
+// The profile update obtains the SQLite writer before reading the number, so
+// concurrent creators cannot observe the same number and overwrite one another.
+func CreateProtocolProfileRevisionContext(ctx context.Context, r *ProtocolProfileRevision) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	database, err := profileDB(ctx)
+	if err != nil {
+		return err
+	}
+	if r == nil || strings.TrimSpace(r.ProfileID) == "" {
+		return errors.New("profile revision identity is required")
+	}
+	if r.State != "" && r.State != ProfileRevisionDraft {
+		return fmt.Errorf("%w: %q", ErrInvalidRevisionState, r.State)
+	}
+	candidate := *r
+	candidate.ID = 0
+	candidate.ProfileID = strings.TrimSpace(candidate.ProfileID)
+	candidate.State = ProfileRevisionDraft
+	create := func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
+		var next any
+		if candidate.Revision <= 0 {
+			next = gorm.Expr("MAX(latest_revision, COALESCE((SELECT MAX(revision) FROM protocol_profile_revisions WHERE profile_id = ?), 0)) + 1", candidate.ProfileID)
+		} else {
+			next = gorm.Expr("CASE WHEN latest_revision < ? THEN ? ELSE latest_revision END", candidate.Revision, candidate.Revision)
+		}
+		result := tx.Model(&ProtocolProfile{}).Where("id = ?", candidate.ProfileID).Update("latest_revision", next)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		if candidate.Revision <= 0 {
+			var profile ProtocolProfile
+			if err := tx.Select("latest_revision").First(&profile, "id = ?", candidate.ProfileID).Error; err != nil {
+				return err
+			}
+			candidate.Revision = profile.LatestRevision
+		}
+		result = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "profile_id"}, {Name: "revision"}},
+			DoNothing: true,
+		}).Create(&candidate)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrProfileRevisionConflict
+		}
+		return nil
+	}
+	// A savepoint also rolls back the number allocation when the caller owns a
+	// transaction and chooses to handle a duplicate instead of aborting its work.
+	// Keep rollback on the owner's context if this operation is canceled.
+	if HasContextTransaction(ctx) {
+		database = DBForContext(ctx)
+	}
+	if err := database.Transaction(create); err != nil {
+		return err
+	}
+	*r = candidate
+	return nil
 }
 
 func SaveProtocolProfileRevision(r *ProtocolProfileRevision) error {

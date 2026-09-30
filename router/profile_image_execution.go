@@ -72,7 +72,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 				if existing.RequestFingerprint != fingerprint {
 					return nil, nil, true, db.ErrTaskIdempotencyConflict
 				}
-				response, responseErr := profileImageResponseFromTaskRun(existing)
+				response, responseErr := profileImageResponseFromTaskRun(c, existing)
 				if responseErr != nil {
 					return nil, nil, true, responseErr
 				}
@@ -173,7 +173,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 			defer unlock()
 			existing, lookupErr := db.FindProfileTaskRunByIdempotencyContext(c.Request.Context(), callerIdempotencyKey, binding.Operation, fingerprint)
 			if lookupErr == nil {
-				response, responseErr := profileImageResponseFromTaskRun(existing)
+				response, responseErr := profileImageResponseFromTaskRun(c, existing)
 				unlock()
 				if responseErr != nil {
 					return nil, candidate, true, responseErr
@@ -281,6 +281,7 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 				return nil, candidate, true, errors.New("persist profile image TaskRun before media materialization")
 			}
 			taskRunID = persistedTaskRunID
+			setImageJobResponseIDs(response, imageResponseTaskID(persistResponse))
 			if len(result.ResultURLs) > 0 && profileMediaRetentionEnabled(op) && !(retention == protocol.MediaRetentionRequired && op.PollingMode == protocol.PollingGatewayWait) {
 				if _, mediaErr := db.EnsureTaskResultMediaContext(c.Request.Context(), taskRunID, asyncTaskKindImage, result.ResultURLs); mediaErr != nil {
 					if reservationID != "" {

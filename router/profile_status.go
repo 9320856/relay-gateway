@@ -522,14 +522,11 @@ func profileDurableStatus(c *gin.Context, run *db.TaskRun, kind string, requeste
 	requiredMedia := op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
 	if kind == asyncTaskKindImage {
 		var payload map[string]any
-		if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &payload) == nil {
+		if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &payload) == nil && payload != nil {
+			payload["status"] = normalizeProfileImageStatus(run.TaskStatus)
 			if reqID != "" {
-				if _, ok := payload["id"]; ok {
-					payload["id"] = reqID
-				}
-				if _, ok := payload["task_id"]; ok {
-					payload["task_id"] = reqID
-				}
+				payload["id"], payload["task_id"] = reqID, reqID
+				setImageJobResponseIDs(payload, reqID)
 			}
 			managed := attachProfileManagedMedia(c, run, kind, payload)
 			if requiredMedia && !managed && (profilePayloadHasMedia(payload) || profileMediaAssetsExist(c, run, kind)) {
@@ -548,6 +545,7 @@ func profileDurableStatus(c *gin.Context, run *db.TaskRun, kind string, requeste
 	}
 	var payload model.VideoTaskResponse
 	if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &payload) == nil {
+		payload.Status = normalizeProfileStatus(run.TaskStatus)
 		if reqID != "" {
 			payload.ID = reqID
 			payload.TaskID = reqID
@@ -600,6 +598,8 @@ func attachProfileManagedMedia(c *gin.Context, run *db.TaskRun, kind string, pay
 		return false
 	}
 	managed := make([]map[string]string, 0, len(assets))
+	replacements := make(map[string]string, len(assets))
+	sources := profileResultURLs(run.ResultBody, kind)
 	for _, asset := range assets {
 		if asset.Status != db.MediaAssetAvailable || asset.ObjectID == "" {
 			continue
@@ -608,9 +608,17 @@ func attachProfileManagedMedia(c *gin.Context, run *db.TaskRun, kind string, pay
 		if capErr != nil {
 			continue
 		}
-		managed = append(managed, map[string]string{"url": mediaPublicURL(c, asset.PublicID, capability)})
+		stableURL := mediaPublicURL(c, asset.PublicID, capability)
+		managed = append(managed, map[string]string{"url": stableURL})
+		replacements[asset.SourceLocator] = stableURL
+		if asset.Ordinal >= 0 && asset.Ordinal < len(sources) {
+			replacements[sources[asset.Ordinal]] = stableURL
+		}
 	}
 	if len(managed) == 0 {
+		return false
+	}
+	if op, ok := profileOperationForRun(c.Request.Context(), run); ok && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && len(managed) != len(assets) {
 		return false
 	}
 	if video, ok := payload.(*model.VideoTaskResponse); ok {
@@ -618,6 +626,11 @@ func attachProfileManagedMedia(c *gin.Context, run *db.TaskRun, kind string, pay
 		return true
 	}
 	if image, ok := payload.(map[string]any); ok {
+		if rewritten, ok := rewriteProfileMediaValue(image, replacements).(map[string]any); ok {
+			for key, value := range rewritten {
+				image[key] = value
+			}
+		}
 		image["data"] = managed
 	}
 	return true
@@ -673,6 +686,25 @@ func clearProfileMediaPayload(payload any) {
 	case map[string]any:
 		delete(value, "data")
 		value["raw"], value["raw_payload"] = nil, nil
+		clearProfileMediaFields(value)
+	}
+}
+
+func clearProfileMediaFields(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "url", "video_url", "image_url", "proxy_url", "thumbnail_url", "b64_json":
+				delete(typed, key)
+			default:
+				clearProfileMediaFields(item)
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			clearProfileMediaFields(item)
+		}
 	}
 }
 
