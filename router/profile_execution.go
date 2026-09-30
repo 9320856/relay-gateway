@@ -67,11 +67,17 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 	// expose a custom video operation before its legacy adapter is removed.
 	var candidates []*config.UpstreamChannel
 	if pinned != nil {
+		if err := requireSelectedChannelModel(pinned, req.Model); err != nil {
+			return nil, pinned, true, err
+		}
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		var err error
 		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, "video.create")
 		if err != nil {
+			if errors.Is(err, service.ErrModelNotSelected) {
+				return nil, nil, true, err
+			}
 			return nil, nil, false, nil
 		}
 	}

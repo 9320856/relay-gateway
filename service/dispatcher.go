@@ -33,6 +33,11 @@ type breakerState struct {
 
 type RetryPolicy int
 
+// ErrModelNotSelected reports that no candidate channel has saved the
+// requested model. Handlers can distinguish this configuration rejection from
+// an upstream failure without relying on error text.
+var ErrModelNotSelected = errors.New("no upstream channel has selected the requested model")
+
 const (
 	RetrySafeRead RetryPolicy = iota
 	RetryInference
@@ -530,8 +535,13 @@ func (d *Dispatcher) ResolveProfileCandidatesContext(ctx context.Context, modelN
 	}
 	modelName = strings.TrimSpace(modelName)
 	eligible := make([]config.UpstreamChannel, 0, len(channels))
+	modelAllowed := false
 	for i := range channels {
 		ch := channels[i]
+		if !ch.AllowsModel(modelName) {
+			continue
+		}
+		modelAllowed = true
 		_, err := db.FindChannelProtocolBindingContext(ctx, ch.ID, operation, modelName)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			continue
@@ -543,6 +553,9 @@ func (d *Dispatcher) ResolveProfileCandidatesContext(ctx context.Context, modelN
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if !modelAllowed {
+		return nil, fmt.Errorf("%w: %q", ErrModelNotSelected, modelName)
 	}
 	if len(eligible) == 0 {
 		return nil, fmt.Errorf("no active upstream channel has an enabled profile binding for operation %q and model %q", operation, modelName)
@@ -583,13 +596,25 @@ func (d *Dispatcher) ResolveCandidatesForProtocol(modelName, protocol string) ([
 // scheduling without depending on legacy adapter metadata.
 func (d *Dispatcher) orderCandidatePool(eligible []config.UpstreamChannel, modelName, protocol string) ([]*config.UpstreamChannel, error) {
 	trimmed := strings.TrimSpace(modelName)
+	allowed := make([]config.UpstreamChannel, 0, len(eligible))
+	for _, ch := range eligible {
+		if ch.AllowsModel(trimmed) {
+			allowed = append(allowed, ch)
+		}
+	}
+	eligible = allowed
+	if len(eligible) == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrModelNotSelected, modelName)
+	}
 
 	// 1. 过滤实际拥有该模型的渠道（检查上游同步的模型库、配置模型列表或 ModelMap 映射）
 	d.modelsMu.RLock()
 	var matchedWithModel []*config.UpstreamChannel
 	for i := range eligible {
 		ch := &eligible[i]
-		hasModel := false
+		// An explicitly selected model remains usable even if discovery is
+		// unavailable or a later refresh no longer reports it.
+		hasModel := ch.SelectedModels != nil
 
 		// 检查上游拉取/同步的动态模型列表
 		if remotes, ok := d.remoteModels[ch.ID]; ok {
@@ -850,6 +875,19 @@ func (d *Dispatcher) ListModels() *model.ModelListResponse {
 
 	channels := d.getActiveChannels()
 	for _, ch := range channels {
+		if ch.SelectedModels != nil {
+			for _, m := range ch.SelectedModels {
+				if ch.AllowsModel(m) {
+					addModel(m, ch.ID)
+				}
+			}
+			for from := range ch.ModelMap {
+				if ch.AllowsModel(from) {
+					addModel(from, ch.ID)
+				}
+			}
+			continue
+		}
 		for _, m := range ch.Models {
 			addModel(m, ch.ID)
 		}
@@ -860,6 +898,9 @@ func (d *Dispatcher) ListModels() *model.ModelListResponse {
 
 	d.modelsMu.RLock()
 	for _, ch := range channels {
+		if ch.SelectedModels != nil {
+			continue
+		}
 		if remotes, ok := d.remoteModels[ch.ID]; ok {
 			for _, m := range remotes {
 				addModel(m, ch.ID)

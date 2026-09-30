@@ -351,6 +351,13 @@ func sanitizedChannelModel(cm db.ChannelModel) map[string]interface{} {
 	result["api_key"] = maskSecret(cm.APIKey)
 	result["api_keys_raw"] = maskSecretList(cm.APIKeysRaw)
 	result["headers_raw"] = sanitizeHeadersRaw(cm.HeadersRaw)
+	if cm.SelectedModelsRaw != "" {
+		selected, err := db.ParseSelectedModels(cm.SelectedModelsRaw)
+		if err != nil {
+			selected = []string{}
+		}
+		result["selected_models"] = selected
+	}
 	delete(result, "last_error_message")
 	delete(result, "api_keys")
 	result["has_api_key"] = strings.TrimSpace(cm.APIKey) != "" || strings.TrimSpace(cm.APIKeysRaw) != ""
@@ -404,10 +411,21 @@ func preserveMaskedChannelSecrets(ctx context.Context, cm *db.ChannelModel) erro
 }
 
 func handleSaveChannel(c *gin.Context) {
-	var cm db.ChannelModel
-	if err := c.ShouldBindJSON(&cm); err != nil {
+	var input struct {
+		db.ChannelModel
+		SelectedModels json.RawMessage `json:"selected_models"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
 		requestError(c, err, "渠道配置格式不正确")
 		return
+	}
+	cm := input.ChannelModel
+	if len(input.SelectedModels) > 0 {
+		if _, err := db.ParseSelectedModels(string(input.SelectedModels)); err != nil {
+			requestError(c, err, "已选模型必须是具体模型名称组成的数组")
+			return
+		}
+		cm.SelectedModelsRaw = string(input.SelectedModels)
 	}
 	cm.ID = strings.TrimSpace(cm.ID)
 	cm.Type = strings.ToLower(strings.TrimSpace(cm.Type))
@@ -1950,6 +1968,10 @@ func handlePlayground(c *gin.Context, legacy bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "指定渠道不存在或已停用"})
 		return
 	}
+	if err := requireSelectedChannelModel(targetChannel, req.Model); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
 
 	// 1. 图像测试。
 	if req.Kind == "image" {
@@ -2706,6 +2728,10 @@ func dispatchStreamingModelRequest(c *gin.Context, protocol string, exec modelSt
 // plain text in model.NewError.
 func writeUpstreamError(c *gin.Context, err error, prefix string) {
 	if err == nil || c.Writer.Written() || errors.Is(err, context.Canceled) {
+		return
+	}
+	if errors.Is(err, service.ErrModelNotSelected) {
+		c.JSON(http.StatusBadRequest, model.NewError("没有可用渠道保存此模型，请勾选模型并保存渠道后重试", "model_not_available"))
 		return
 	}
 	status, contentType, retryAfter, rawBody := extractUpstreamErrorInfo(err)

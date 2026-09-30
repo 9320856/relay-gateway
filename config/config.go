@@ -25,7 +25,31 @@ type UpstreamChannel struct {
 	AnthropicVersion string            `yaml:"anthropic_version"`  // Anthropic 协议版本头，默认 2023-06-01
 	Headers          map[string]string `yaml:"headers"`            // 自定义附加请求头
 	Models           []string          `yaml:"models"`
-	ModelMap         map[string]string `yaml:"model_map"` // mapping from incoming model to upstream model
+	SelectedModels   []string          `yaml:"selected_models,omitempty"` // nil preserves legacy routing; an empty selection disables new model calls
+	ModelMap         map[string]string `yaml:"model_map"`                 // mapping from incoming model to upstream model
+}
+
+// AllowsModel checks the saved selection against the upstream model that will
+// actually be called. Mapping keys retain their exact-match semantics, while
+// concrete model IDs use the dispatcher's case-insensitive matching convention.
+func (c UpstreamChannel) AllowsModel(modelName string) bool {
+	if c.SelectedModels == nil {
+		return true
+	}
+	target := strings.TrimSpace(modelName)
+	if mapped := strings.TrimSpace(c.ModelMap[target]); mapped != "" {
+		target = mapped
+	}
+	if target == "" {
+		return false
+	}
+	for _, selected := range c.SelectedModels {
+		selected = strings.TrimSpace(selected)
+		if selected != "" && !strings.ContainsAny(selected, "*?") && strings.EqualFold(selected, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *UpstreamChannel) GetEffectiveKeys() []string {

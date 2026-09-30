@@ -84,6 +84,9 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 	}
 	var candidates []*config.UpstreamChannel
 	if pinned != nil {
+		if err := requireSelectedChannelModel(pinned, req.Model); err != nil {
+			return nil, pinned, true, err
+		}
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		var err error
@@ -97,6 +100,9 @@ func profileEngineImageCreateForChannel(c *gin.Context, req *model.ImageGenerati
 			candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), req.Model, operation)
 		}
 		if err != nil {
+			if errors.Is(err, service.ErrModelNotSelected) {
+				return nil, nil, true, err
+			}
 			return nil, nil, false, nil
 		}
 	}

@@ -36,7 +36,7 @@
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span>
-        <span>V0.1 · 开发测试版</span>
+        <span>V0.2.1 · 开发测试版</span>
       </div>
     </aside>
 
@@ -93,9 +93,9 @@
           <small class="stat-meta">连通测试正常</small>
         </article>
         <article class="stat overview-cell">
-          <span class="stat-label">已发现模型</span>
+          <span class="stat-label">可用模型</span>
           <strong class="stat-value" id="stat-models">0</strong>
-          <small class="stat-meta">同步聚合模型总数</small>
+          <small class="stat-meta">已保存的模型及别名</small>
         </article>
         <article class="stat overview-cell">
           <span class="stat-label">网关 Key</span>
@@ -309,22 +309,28 @@
           <div class="model-editor-head">
             <div>
               <strong id="model-editor-title">上游模型</strong>
-              <small>保存后会自动同步，也可以现在测试凭据并获取模型。</small>
+              <small>勾选要启用的上游模型。首次获取默认全选，后续发现的新模型需手动勾选。全部取消后，此渠道不接收新请求。</small>
             </div>
             <button class="button" id="fetch-channel-models" type="button">获取模型</button>
           </div>
           <p class="model-fetch-status" id="model-fetch-status" aria-live="polite">尚未获取</p>
-          <div class="model-catalog" id="model-catalog"></div>
+          <div class="model-selection-toolbar">
+            <input id="channel-model-search" type="search" placeholder="搜索模型" aria-label="搜索上游模型">
+            <button class="button ghost compact-btn" id="channel-model-select-all" type="button">全选全部</button>
+            <button class="button ghost compact-btn" id="channel-model-clear-all" type="button">清空全部</button>
+          </div>
+          <p class="model-selection-count" id="channel-model-count" aria-live="polite">已选 0 / 0 个</p>
+          <div class="model-catalog" id="model-catalog" role="group" aria-label="可选上游模型"></div>
           <datalist id="channel-model-options"></datalist>
         </section>
 
-        <label class="full">手动模型（每行一个，支持 *）<textarea name="models_raw" rows="3" spellcheck="false" placeholder="无法自动获取时可在此补充"></textarea></label>
+        <label class="full">手动模型（每行一个）<textarea name="models_raw" rows="3" spellcheck="false" placeholder="填写具体模型名称，再在上方勾选启用；通配符不会加入可选列表"></textarea></label>
 
         <section class="full mapping-editor" aria-labelledby="mapping-editor-title">
           <div class="model-editor-head">
             <div>
               <strong id="mapping-editor-title">模型映射</strong>
-              <small>对外模型名 → 上游模型；映射会作为别名补充。</small>
+              <small>对外模型名 → 上游模型；勾选上游模型后，对应别名才会启用。</small>
             </div>
             <button class="button" id="add-model-mapping" type="button">添加映射</button>
           </div>

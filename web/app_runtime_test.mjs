@@ -146,6 +146,8 @@ class FakeElement {
   }
 
   remove() {}
+
+  focus() {}
 }
 
 class FakeDocument {
@@ -762,12 +764,20 @@ const channelPicker = new ChannelSelect();
 channelDocument.elements.set("channel-protocol-picker", channelPicker);
 const channelDialog = channelDocument.getElementById("channel-dialog");
 channelDialog.showModal = () => { channelDialog.open = true; };
+channelDialog.close = () => { channelDialog.open = false; channelDialog.dispatchEvent({ type: "close" }); };
 channelDocument.querySelector = (selector) => selector.includes("profile_id") ? channelForm.elements.profile_id : null;
 let channelBindings = [];
+let channelFetchImpl = async () => response(200, { data: channelBindings });
 const channelContext = vm.createContext({
   console, document: channelDocument,
   Event: class { constructor(type) { this.type = type; } },
-  fetch: async () => response(200, { data: channelBindings }),
+  fetch: async (url, options) => channelFetchImpl(url, options),
+  FormData: class {
+    constructor(form) { this.form = form; }
+    entries() { return Object.entries(this.form.elements).map(([name, input]) => [name, input.value || ""]); }
+  },
+  setTimeout: () => 1,
+  clearTimeout() {},
 });
 vm.runInContext(source, channelContext, { filename: "app.js" });
 vm.runInContext(`
@@ -791,6 +801,139 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(channelPicker.value, "profile:custom-profile", "async binding restoration must still select the custom profile");
 assert.equal(channelForm.elements.profile_id.value, "custom-profile");
 assert.equal(channelForm.elements.type.value, "newapi", "restoring a profile must retain the credential adapter");
+
+// Discovery remains complete while availability and user selection stay separate.
+const selectedChannel = {
+  models_synced_raw: JSON.stringify(["provider-a", "provider-b", "gpt-*", "model-[ab]", "Provider-A"]),
+  models_raw: "manual-model\n*\ngpt-?",
+  model_map_raw: JSON.stringify({ friendly: "provider-a", hidden: "provider-b" }),
+  selected_models: ["provider-a"],
+};
+const runChannel = (code) => vm.runInContext(code, channelContext);
+const selectedModels = () => JSON.parse(runChannel("JSON.stringify([...channelSelectedModels])"));
+const modelChoices = () => channelDocument.getElementById("model-catalog").querySelectorAll("label");
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModelCandidates(${JSON.stringify(selectedChannel)}))`)), ["provider-a", "provider-b", "manual-model"]);
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels(${JSON.stringify(selectedChannel)}))`)), ["provider-a", "friendly"]);
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels(${JSON.stringify({ ...selectedChannel, selected_models: [] })}))`)), []);
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels({selected_models:['a'],model_map_raw:'{"a":"b"}'}))`)), [], "selected incoming names cannot bypass an unselected mapping target");
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels({selected_models:['b'],model_map_raw:'{"a":"b"}'}))`)), ["b", "a"], "aliases are available when their mapped target is selected");
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels({selected_models:['constructor'],model_map_raw:'{}'}))`)), ["constructor"], "object prototype properties are not model mappings");
+assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels(${JSON.stringify({ ...selectedChannel, selected_models: ["PROVIDER-A"] })}))`)), ["PROVIDER-A", "friendly"], "alias target matching agrees with case-insensitive backend model matching");
+
+runChannel("bindChannelForm()");
+runChannel("openChannelDialog()");
+const fetchButton = channelDocument.getElementById("fetch-channel-models");
+channelFetchImpl = async () => response(200, { status: "ok", models: ["provider-a", "provider-b"], count: 2 });
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), ["provider-a", "provider-b"], "the first discovery for a new empty channel selects all concrete models");
+assert.equal(modelChoices().length, 2);
+assert.equal(channelDocument.getElementById("channel-model-count").textContent, "已选 2 / 2 个");
+const firstChoice = modelChoices()[0].querySelector("input");
+firstChoice.checked = false;
+firstChoice.dispatchEvent({ type: "change" });
+assert.deepEqual(selectedModels(), ["provider-b"], "checkbox changes update selection");
+assert.equal(modelChoices()[0].querySelector("input"), firstChoice, "toggling selection keeps the focused checkbox in the document for keyboard navigation");
+channelFetchImpl = async () => response(200, { status: "ok", models: ["provider-a", "provider-b", "provider-c"], count: 3 });
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), ["provider-b"], "refresh preserves exclusions and does not select newly discovered models");
+const search = channelDocument.getElementById("channel-model-search");
+search.value = "PROVIDER-C";
+search.dispatchEvent({ type: "input" });
+assert.equal(modelChoices().length, 1, "search only changes visible candidates");
+channelDocument.getElementById("channel-model-select-all").dispatchEvent({ type: "click" });
+assert.deepEqual(selectedModels(), ["provider-a", "provider-b", "provider-c"], "select all includes models hidden by search");
+channelDocument.getElementById("channel-model-clear-all").dispatchEvent({ type: "click" });
+assert.deepEqual(selectedModels(), [], "clear all includes models hidden by search");
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), [], "refresh never reselects after clear all");
+
+runChannel(`openChannelDialog(${JSON.stringify({ id: "restricted", type: "openai", enabled: true, base_url: "https://api.example/v1", ...selectedChannel })})`);
+assert.deepEqual(selectedModels(), ["provider-a"]);
+assert.equal(search.value, "", "switching channels resets search");
+assert.equal(modelChoices().length, 3, "an edited channel offers all discovered/manual/mapped targets, not just selected models");
+channelForm.elements.models_raw.value = "manual-added\n*\nmodel-?\nmodel-[ab]";
+channelForm.elements.models_raw.dispatchEvent({ type: "input" });
+const manualChoice = modelChoices().find(label => label.querySelector("span").textContent === "manual-added");
+assert.ok(manualChoice, "manual concrete models enter the selectable catalog");
+assert.equal(manualChoice.querySelector("input").checked, false);
+manualChoice.querySelector("input").checked = true;
+manualChoice.querySelector("input").dispatchEvent({ type: "change" });
+assert.deepEqual(selectedModels(), ["provider-a", "manual-added"]);
+assert.ok(modelChoices().every(label => !/[\*?\[]/.test(label.querySelector("span").textContent)), "wildcards never enter the catalog");
+runChannel("addModelMappingRow('new-alias', 'new-target')");
+const targetInput = channelDocument.getElementById("mapping-list").querySelectorAll(".mapping-target").at(-1);
+targetInput.dispatchEvent({ type: "input" });
+assert.ok(modelChoices().some(label => label.querySelector("span").textContent === "new-target"));
+assert.ok(!selectedModels().includes("new-target"), "mapping targets require an explicit selection");
+
+runChannel(`openChannelDialog(${JSON.stringify({ id: "empty", type: "openai", base_url: "https://api.example/v1", selected_models: [] })})`);
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), [], "saved empty selections remain empty even when they had no candidates");
+runChannel(`openChannelDialog(${JSON.stringify({ id: "legacy", type: "openai", ...selectedChannel, selected_models: undefined })})`);
+assert.deepEqual(selectedModels(), ["provider-a", "provider-b", "manual-model"], "old unrestricted channels preselect their existing concrete candidates");
+runChannel("openChannelDialog({id:'legacy-empty',type:'openai',base_url:'https://api.example/v1'})");
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), ["provider-a", "provider-b", "provider-c"], "unrestricted legacy channels without cached candidates select their first successful discovery");
+runChannel("openChannelDialog()");
+runChannel("selectAllChannelModels(false)");
+await runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+assert.deepEqual(selectedModels(), [], "clear all before the first discovery explicitly prevents default selection");
+
+// Pending fetches and binding lookups must not mutate a later dialog session.
+runChannel("openChannelDialog()");
+let finishOldFetch;
+channelFetchImpl = async (url) => url.includes("probe-models")
+  ? new Promise(resolve => { finishOldFetch = resolve; })
+  : response(200, { data: [] });
+const oldFetch = runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+channelDialog.close();
+runChannel("openChannelDialog()");
+finishOldFetch(response(200, { status: "ok", models: ["stale-model"] }));
+await oldFetch;
+assert.deepEqual(selectedModels(), []);
+assert.equal(modelChoices().length, 0, "a fetch from a closed dialog cannot populate a reopened dialog");
+assert.equal(fetchButton.disabled, false);
+
+runChannel("openChannelDialog()");
+let finishConfiguredFetch;
+channelFetchImpl = async () => new Promise(resolve => { finishConfiguredFetch = resolve; });
+const configuredFetch = runChannel("fetchChannelModels(byId('fetch-channel-models'))");
+channelForm.elements.base_url.value = "https://different.example/v1";
+finishConfiguredFetch(response(200, { status: "ok", models: ["wrong-provider"] }));
+await configuredFetch;
+assert.equal(modelChoices().length, 0, "changing provider inputs invalidates the pending discovery");
+assert.match(channelDocument.getElementById("model-fetch-status").textContent, /配置已更改/);
+
+let finishBindings;
+channelFetchImpl = async () => new Promise(resolve => { finishBindings = resolve; });
+runChannel("openChannelDialog({id:'old-profile',type:'openai'})");
+const resolveOldBindings = finishBindings;
+runChannel("openChannelDialog()");
+resolveOldBindings(response(200, { data: [{model_pattern:'*',precedence:0,profile_id:'custom-profile',profile_revision:2}] }));
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(channelPicker.value, "builtin:openai", "stale binding restoration cannot change a new dialog");
+
+// Save includes explicit empty arrays, and reopening is sourced from saved state.
+const submittedChannels = [];
+channelFetchImpl = async (url, options) => {
+  if (url === "/api/channels" && options?.method === "POST") {
+    const payload = JSON.parse(options.body);
+    submittedChannels.push(payload);
+    return response(200, { channel: {} });
+  }
+  return response(200, { channels: [], data: [] });
+};
+const submitButton = new FakeElement("button");
+channelForm.querySelector = () => submitButton;
+// These dashboard functions are outside this form harness; saving still uses real request/payload logic.
+runChannel("loadChannels = async () => {}");
+runChannel(`openChannelDialog(${JSON.stringify({ id: "saved", type: "openai", base_url: "https://api.example/v1", ...selectedChannel })})`);
+runChannel("selectAllChannelModels(false)");
+for (const handler of channelForm.listeners.get("submit") || []) await handler({ preventDefault() {}, currentTarget: channelForm });
+assert.deepEqual(submittedChannels.at(-1).selected_models, [], "save must distinguish explicit empty selection from an omitted field");
+runChannel(`openChannelDialog(${JSON.stringify({ id: "saved", type: "openai", base_url: "https://api.example/v1", ...selectedChannel })})`);
+for (const handler of channelForm.listeners.get("submit") || []) await handler({ preventDefault() {}, currentTarget: channelForm });
+assert.deepEqual(submittedChannels.at(-1).selected_models, ["provider-a"], "saving persists precisely the selected upstream names");
 
 async function setupHarness(status, statusFailure = false) {
   const setupDocument = new FakeDocument();

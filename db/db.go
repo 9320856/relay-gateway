@@ -74,7 +74,7 @@ func SQLDBForContext(ctx context.Context) *gorm.DB {
 	return conn.WithContext(ctx)
 }
 
-const SchemaVersion = "3"
+const SchemaVersion = "4"
 
 const previousSchemaVersion = "2"
 
@@ -125,24 +125,25 @@ type SchemaMeta struct {
 func (SchemaMeta) TableName() string { return "schema_meta" }
 
 type ChannelModel struct {
-	ID               string    `gorm:"primaryKey;size:64" json:"id"`
-	Name             string    `gorm:"size:128;not null" json:"name"`
-	Type             string    `gorm:"size:32;not null;index" json:"type"`
-	BaseURL          string    `gorm:"size:512;not null" json:"base_url"`
-	Enabled          bool      `gorm:"not null;index" json:"enabled"`
-	Priority         int       `gorm:"not null;default:1;index" json:"priority"`
-	Weight           int       `gorm:"not null;default:1" json:"weight"`
-	FetchModels      bool      `gorm:"not null" json:"fetch_models"`
-	AnthropicVersion string    `gorm:"size:32;default:'2023-06-01'" json:"anthropic_version"`
-	ModelsRaw        string    `gorm:"type:text" json:"models_raw"`
-	ModelMapRaw      string    `gorm:"type:text" json:"model_map_raw"`
-	HeadersRaw       string    `gorm:"type:text" json:"headers_raw"`
-	LastLatencyMs    int       `gorm:"not null;default:0" json:"last_latency_ms"`
-	LastStatus       string    `gorm:"size:32;not null;default:'untested'" json:"last_status"`
-	LastErrorMessage string    `gorm:"type:text" json:"last_error_message"`
-	ModelsSyncedRaw  string    `gorm:"type:text" json:"models_synced_raw"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                string    `gorm:"primaryKey;size:64" json:"id"`
+	Name              string    `gorm:"size:128;not null" json:"name"`
+	Type              string    `gorm:"size:32;not null;index" json:"type"`
+	BaseURL           string    `gorm:"size:512;not null" json:"base_url"`
+	Enabled           bool      `gorm:"not null;index" json:"enabled"`
+	Priority          int       `gorm:"not null;default:1;index" json:"priority"`
+	Weight            int       `gorm:"not null;default:1" json:"weight"`
+	FetchModels       bool      `gorm:"not null" json:"fetch_models"`
+	AnthropicVersion  string    `gorm:"size:32;default:'2023-06-01'" json:"anthropic_version"`
+	ModelsRaw         string    `gorm:"type:text" json:"models_raw"`
+	SelectedModelsRaw string    `gorm:"type:text" json:"-"`
+	ModelMapRaw       string    `gorm:"type:text" json:"model_map_raw"`
+	HeadersRaw        string    `gorm:"type:text" json:"headers_raw"`
+	LastLatencyMs     int       `gorm:"not null;default:0" json:"last_latency_ms"`
+	LastStatus        string    `gorm:"size:32;not null;default:'untested'" json:"last_status"`
+	LastErrorMessage  string    `gorm:"type:text" json:"last_error_message"`
+	ModelsSyncedRaw   string    `gorm:"type:text" json:"models_synced_raw"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 
 	APIKey     string   `gorm:"-" json:"api_key,omitempty"`
 	APIKeysRaw string   `gorm:"-" json:"api_keys_raw,omitempty"`
@@ -440,11 +441,11 @@ func migrateSchema(conn *gorm.DB, models []any) error {
 	if meta.Value == SchemaVersion {
 		return nil
 	}
-	if meta.Value != previousSchemaVersion {
+	if !supportedSchemaVersion(meta.Value) {
 		return fmt.Errorf("%w: found version %q, need %q; back up and migrate the database before starting this version", ErrIncompatibleSchema, meta.Value, SchemaVersion)
 	}
 	if err := conn.AutoMigrate(models...); err != nil {
-		return fmt.Errorf("migrate schema %s to %s: %w", previousSchemaVersion, SchemaVersion, err)
+		return fmt.Errorf("migrate schema %s to %s: %w", meta.Value, SchemaVersion, err)
 	}
 	if err := conn.Model(&SchemaMeta{}).Where("key = ?", "schema_version").Update("value", SchemaVersion).Error; err != nil {
 		return fmt.Errorf("record schema version %s: %w", SchemaVersion, err)
@@ -471,10 +472,14 @@ func validateSchema(conn *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("read schema marker: %w", err)
 	}
-	if meta.Value != SchemaVersion && meta.Value != previousSchemaVersion {
+	if !supportedSchemaVersion(meta.Value) {
 		return fmt.Errorf("%w: found version %q, need %q; back up and migrate the database before starting this version", ErrIncompatibleSchema, meta.Value, SchemaVersion)
 	}
 	return nil
+}
+
+func supportedSchemaVersion(version string) bool {
+	return version == SchemaVersion || version == previousSchemaVersion || version == "3"
 }
 
 func parseList(raw string) []string {
@@ -800,7 +805,12 @@ func (m *ChannelModel) ToUpstreamChannel() config.UpstreamChannel {
 	if weight <= 0 {
 		weight = 1
 	}
-	return config.UpstreamChannel{ID: m.ID, Type: m.Type, BaseURL: m.BaseURL, APIKey: m.APIKey, APIKeys: append([]string(nil), m.APIKeys...), Enabled: m.Enabled, Priority: priority, Weight: weight, FetchModels: m.FetchModels, AnthropicVersion: m.AnthropicVersion, Headers: headers, Models: parseList(m.ModelsRaw), ModelMap: modelMap}
+	selectedModels, err := ParseSelectedModels(m.SelectedModelsRaw)
+	if err != nil {
+		// A malformed stored whitelist must not restore unrestricted routing.
+		selectedModels = []string{}
+	}
+	return config.UpstreamChannel{ID: m.ID, Type: m.Type, BaseURL: m.BaseURL, APIKey: m.APIKey, APIKeys: append([]string(nil), m.APIKeys...), Enabled: m.Enabled, Priority: priority, Weight: weight, FetchModels: m.FetchModels, AnthropicVersion: m.AnthropicVersion, Headers: headers, Models: parseList(m.ModelsRaw), SelectedModels: selectedModels, ModelMap: modelMap}
 }
 
 func RefreshActiveChannelsCache() {
@@ -1027,9 +1037,14 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 	if cm.AnthropicVersion == "" {
 		cm.AnthropicVersion = "2023-06-01"
 	}
-	// This value is discovered from the current upstream, never user input.
-	// Clearing it on every save prevents an edited channel from routing against
-	// capabilities learned from a previous URL, type, or credential set.
+	if selected, err := ParseSelectedModels(cm.SelectedModelsRaw); err != nil {
+		return err
+	} else if selected != nil {
+		encoded, _ := json.Marshal(selected)
+		cm.SelectedModelsRaw = string(encoded)
+	}
+	// Discovered capabilities are never accepted from clients. A save may
+	// restore the existing cache below only when discovery inputs are unchanged.
 	cm.ModelsSyncedRaw = ""
 	keys := append([]string(nil), cm.APIKeys...)
 	if len(keys) == 0 {
@@ -1066,8 +1081,24 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 	}
 	saveFn := func(tx *gorm.DB) error {
 		var existing ChannelModel
-		found := tx.First(&existing, "id = ?", cm.ID).Error == nil
+		lookupErr := tx.First(&existing, "id = ?", cm.ID).Error
+		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return lookupErr
+		}
+		found := lookupErr == nil
 		if found {
+			if strings.TrimSpace(cm.SelectedModelsRaw) == "" {
+				// Older management clients omit this field. They cannot silently
+				// remove a whitelist established by the current console.
+				cm.SelectedModelsRaw = existing.SelectedModelsRaw
+			}
+			unchanged, err := channelDiscoveryInputsUnchanged(tx, &existing, cm, keys)
+			if err != nil {
+				return err
+			}
+			if unchanged {
+				cm.ModelsSyncedRaw = existing.ModelsSyncedRaw
+			}
 			cm.CreatedAt = existing.CreatedAt
 			// Windows wall-clock resolution can produce identical timestamps for
 			// successive saves. Keep the persisted discovery revision monotonic.

@@ -270,6 +270,11 @@ let channels = [];
 let adapterTypes = [];
 let channelProfiles = [];
 let channelModelOptions = [];
+let channelDiscoveredModels = [];
+let channelSelectedModels = new Set();
+let channelSelectionInitialized = false;
+let channelDialogVersion = 0;
+let channelModelFetchVersion = 0;
 let playgroundPollToken = 0;
 
 function parseLines(value) {
@@ -297,17 +302,47 @@ function parseJSON(value, fallback) {
   }
 }
 
-function channelModels(channel, includeAliases = true) {
+function concreteModels(values) {
+  const seen = new Set();
+  return uniqueStrings(Array.isArray(values) ? values : []).filter((name) => {
+    const key = name.toLowerCase();
+    if (/[\*?\[]/.test(name) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function channelModelCandidates(channel) {
   const values = [];
   const synced = parseJSON(channel?.models_synced_raw, []);
   if (Array.isArray(synced)) values.push(...synced);
-  values.push(...parseLines(channel?.models_raw).filter((model) => model !== "*"));
+  values.push(...parseLines(channel?.models_raw));
   const mapping = parseJSON(channel?.model_map_raw, {});
   if (mapping && typeof mapping === "object") {
-    if (includeAliases) values.push(...Object.keys(mapping));
     values.push(...Object.values(mapping));
   }
-  return uniqueStrings(values);
+  if (Array.isArray(channel?.selected_models)) values.push(...channel.selected_models);
+  return concreteModels(values);
+}
+
+function channelModels(channel, includeAliases = true) {
+  const mappingValue = parseJSON(channel?.model_map_raw, {});
+  const mapping = mappingValue && typeof mappingValue === "object" && !Array.isArray(mappingValue) ? mappingValue : {};
+  const restricted = Array.isArray(channel?.selected_models);
+  const selectedModels = restricted ? concreteModels(channel.selected_models) : [];
+  const selected = new Set(selectedModels.map((name) => name.toLowerCase()));
+  const values = restricted
+    ? selectedModels.filter((name) => {
+      const target = Object.prototype.hasOwnProperty.call(mapping, name) ? mapping[name] : name;
+      return selected.has(String(target).trim().toLowerCase());
+    })
+    : channelModelCandidates(channel);
+  if (includeAliases) {
+    Object.entries(mapping).forEach(([source, target]) => {
+      if (!restricted || selected.has(String(target).trim().toLowerCase())) values.push(source);
+    });
+  }
+  return concreteModels(values);
 }
 
 function cell(text, className = "") {
@@ -598,12 +633,12 @@ function renderChannelProfileOptions(selectedID = "", selectedRevision = 0) {
   }
 }
 
-async function restoreChannelProfileSelection(channelID) {
+async function restoreChannelProfileSelection(channelID, dialogVersion = channelDialogVersion) {
   if (!channelID) return;
   try {
     const data = await request(`/api/profile-bindings?channel_id=${encodeURIComponent(channelID)}`);
     const binding = (Array.isArray(data.data) ? data.data : []).find((item) => item.model_pattern === "*" && Number(item.precedence) === 0 && channelProfiles.some((profile) => profile.id === item.profile_id));
-    if (!binding || !byId("channel-dialog")?.open) return;
+    if (!binding || !byId("channel-dialog")?.open || dialogVersion !== channelDialogVersion) return;
     const current = channelProfiles.find((profile) => profile.id === binding.profile_id);
     renderChannelProfileOptions(binding.profile_id, current?.revision || binding.profile_revision);
     byId("channel-form").elements.profile_id.dispatchEvent(new Event("change"));
@@ -620,21 +655,68 @@ async function restoreChannelProfileSelection(channelID) {
 }
 
 function setChannelModelOptions(models) {
-  channelModelOptions = uniqueStrings(models);
+  channelModelOptions = concreteModels(models);
+  renderChannelModelOptions();
+}
+
+function renderChannelModelOptions() {
   const catalog = byId("model-catalog");
   catalog.replaceChildren();
   const datalist = byId("channel-model-options");
   datalist.replaceChildren();
+  const query = String(byId("channel-model-search")?.value || "").trim().toLowerCase();
+  const selected = new Set([...channelSelectedModels].map((name) => name.toLowerCase()));
+  let visible = 0;
   channelModelOptions.forEach((model) => {
-    const chip = document.createElement("span");
-    chip.className = "model-chip";
-    chip.textContent = model;
-    catalog.append(chip);
     const option = document.createElement("option");
     option.value = model;
     datalist.append(option);
+    if (!model.toLowerCase().includes(query)) return;
+    visible++;
+    const label = document.createElement("label");
+    label.className = "model-choice";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(model.toLowerCase());
+    checkbox.addEventListener("change", () => {
+      channelSelectionInitialized = true;
+      [...channelSelectedModels].forEach((name) => {
+        if (name.toLowerCase() === model.toLowerCase()) channelSelectedModels.delete(name);
+      });
+      if (checkbox.checked) channelSelectedModels.add(model);
+      updateChannelModelCount();
+    });
+    const text = document.createElement("span");
+    text.textContent = model;
+    label.append(checkbox, text);
+    catalog.append(label);
   });
-  catalog.classList.toggle("empty-catalog", channelModelOptions.length === 0);
+  if (!visible) {
+    const empty = document.createElement("p");
+    empty.className = "empty-inline";
+    empty.textContent = channelModelOptions.length ? "没有匹配的模型" : "获取模型或填写手动模型后，在此选择要启用的模型。";
+    catalog.append(empty);
+  }
+  updateChannelModelCount();
+}
+
+function updateChannelModelCount() {
+  const query = String(byId("channel-model-search")?.value || "").trim().toLowerCase();
+  const visible = channelModelOptions.filter((name) => name.toLowerCase().includes(query)).length;
+  const count = byId("channel-model-count");
+  if (count) count.textContent = `已选 ${channelSelectedModels.size} / ${channelModelOptions.length} 个${query ? ` · 匹配 ${visible} 个` : ""}`;
+}
+
+function refreshChannelModelCandidates() {
+  const form = byId("channel-form");
+  const targets = Array.from(byId("mapping-list").querySelectorAll(".mapping-target"), (input) => input.value);
+  setChannelModelOptions([...channelDiscoveredModels, ...parseLines(form.elements.models_raw.value), ...targets, ...channelSelectedModels]);
+}
+
+function selectAllChannelModels(selected) {
+  channelSelectionInitialized = true;
+  channelSelectedModels = new Set(selected ? channelModelOptions : []);
+  renderChannelModelOptions();
 }
 
 function addModelMappingRow(source = "", target = "") {
@@ -665,7 +747,9 @@ function addModelMappingRow(source = "", target = "") {
   remove.addEventListener("click", () => {
     row.remove();
     byId("mapping-empty").classList.toggle("hidden", byId("mapping-list").children.length !== 0);
+    refreshChannelModelCandidates();
   });
+  targetInput.addEventListener("input", refreshChannelModelCandidates);
   row.append(sourceInput, targetInput, remove);
   byId("mapping-list").append(row);
   byId("mapping-empty").classList.add("hidden");
@@ -698,6 +782,13 @@ function serializeModelMappings() {
 }
 
 function openChannelDialog(channel = null) {
+  channelDialogVersion++;
+  channelModelFetchVersion++;
+  channelDiscoveredModels = [];
+  channelSelectedModels = new Set();
+  channelSelectionInitialized = Boolean(channel);
+  setBusy(byId("fetch-channel-models"), false);
+  if (byId("channel-model-search")) byId("channel-model-search").value = "";
   const form = byId("channel-form");
   form.reset();
   if (form.elements.profile_id) {
@@ -740,10 +831,13 @@ function openChannelDialog(channel = null) {
       picker._updateCustomSelectLabel?.();
     }
   }
-  const models = channel ? channelModels(channel, false) : [];
+  const models = channel ? channelModelCandidates(channel) : [];
+  channelSelectionInitialized = Array.isArray(channel?.selected_models) || models.length > 0;
+  channelDiscoveredModels = concreteModels(parseJSON(channel?.models_synced_raw, []));
+  channelSelectedModels = new Set(Array.isArray(channel?.selected_models) ? concreteModels(channel.selected_models) : models);
   setChannelModelOptions(models);
   renderModelMappings(channel?.model_map_raw || "{}");
-  byId("model-fetch-status").textContent = models.length ? `已加载 ${models.length} 个已保存模型` : "尚未获取";
+  byId("model-fetch-status").textContent = models.length ? `已加载 ${models.length} 个候选模型` : "尚未获取";
   form.scrollTop = 0;
   byId("channel-dialog").showModal();
   if (channel) void restoreChannelProfileSelection(channel.id);
@@ -757,6 +851,11 @@ async function fetchChannelModels(button) {
   const form = byId("channel-form");
   const data = formObject(form);
   const status = byId("model-fetch-status");
+  const dialogVersion = channelDialogVersion;
+  const fetchVersion = ++channelModelFetchVersion;
+  const signature = () => ["id", "type", "base_url", "api_keys_raw"].map((name) => String(form.elements[name]?.value || "")).join("\u0000");
+  const requestSignature = signature();
+  const isCurrent = () => dialogVersion === channelDialogVersion && fetchVersion === channelModelFetchVersion && byId("channel-dialog")?.open && requestSignature === signature();
   if (!data.base_url) {
     status.textContent = "请先填写 Base URL";
     form.elements.base_url.focus();
@@ -774,14 +873,22 @@ async function fetchChannelModels(button) {
         api_keys_raw: data.api_keys_raw
       }
     });
+    if (!isCurrent()) return;
     if (result.status !== "ok") throw new Error(result.error || "模型获取失败");
-    setChannelModelOptions(result.models || []);
+    const selectInitially = !channelSelectionInitialized && channelModelOptions.length === 0;
+    channelDiscoveredModels = concreteModels(Array.isArray(result.models) ? result.models : []);
+    refreshChannelModelCandidates();
+    if (selectInitially && channelModelOptions.length) selectAllChannelModels(true);
     status.textContent = `已获取 ${result.count || 0} 个模型 · ${result.latency || 0} ms`;
     toast("模型列表已更新");
   } catch (err) {
+    if (!isCurrent()) return;
     status.textContent = `获取失败：${err.message}`;
   } finally {
-    setBusy(button, false);
+    if (dialogVersion === channelDialogVersion && fetchVersion === channelModelFetchVersion) {
+      if (byId("channel-dialog")?.open && requestSignature !== signature()) status.textContent = "渠道配置已更改，请重新获取模型";
+      setBusy(button, false);
+    }
   }
 }
 
@@ -831,6 +938,15 @@ function bindChannelForm() {
   byId("empty-add-channel")?.addEventListener("click", openAdd);
   ["cancel-channel", "cancel-channel-bottom"].forEach((id) => byId(id)?.addEventListener("click", () => byId("channel-dialog")?.close()));
   byId("fetch-channel-models")?.addEventListener("click", (event) => fetchChannelModels(event.currentTarget));
+  byId("channel-dialog")?.addEventListener("close", () => {
+    channelDialogVersion++;
+    channelModelFetchVersion++;
+    setBusy(byId("fetch-channel-models"), false);
+  });
+  byId("channel-model-search")?.addEventListener("input", renderChannelModelOptions);
+  byId("channel-model-select-all")?.addEventListener("click", () => selectAllChannelModels(true));
+  byId("channel-model-clear-all")?.addEventListener("click", () => selectAllChannelModels(false));
+  byId("channel-form").elements.models_raw.addEventListener("input", refreshChannelModelCandidates);
   byId("add-model-mapping")?.addEventListener("click", () => addModelMappingRow());
   byId("channel-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -847,6 +963,7 @@ function bindChannelForm() {
     const payload = {
       ...data,
       model_map_raw: modelMapRaw,
+      selected_models: concreteModels([...channelSelectedModels]),
       priority: Number(data.priority || 1),
       weight: Number(data.weight || 1),
       enabled: form.elements.enabled.checked,
@@ -889,7 +1006,7 @@ function bindChannelForm() {
       if (payload.fetch_models && id) {
         try {
           const result = await request(`/api/channels/${encodeURIComponent(id)}/models?refresh=true`);
-          toast(`模型同步完成，共 ${result.models?.length || 0} 个`);
+          toast(`候选模型同步完成，共 ${result.models?.length || 0} 个；已保存 ${payload.selected_models.length} 个可用模型`);
         } catch (err) {
           toast(`渠道已保存，但模型同步失败：${err.message}`);
         }

@@ -42,11 +42,17 @@ func profileEngineMultipartDirect(c *gin.Context, operation string, form *multip
 	var candidates []*config.UpstreamChannel
 	var err error
 	if pinned != nil {
+		if err := requireSelectedChannelModel(pinned, modelName); err != nil {
+			return true, err
+		}
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, operation)
 	}
 	if err != nil {
+		if errors.Is(err, service.ErrModelNotSelected) {
+			return true, err
+		}
 		return false, nil
 	}
 	if entry := audit.FromContext(c.Request.Context()); entry != nil {
@@ -256,6 +262,9 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 	bindingOperation := operation
 	var candidates []*config.UpstreamChannel
 	if pinned != nil {
+		if err := requireSelectedChannelModel(pinned, modelName); err != nil {
+			return true, pinned, err
+		}
 		candidates = []*config.UpstreamChannel{pinned}
 	} else {
 		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, bindingOperation)
@@ -269,6 +278,9 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 		candidates, err = service.DefaultDispatcher.ResolveProfileCandidatesContext(c.Request.Context(), modelName, bindingOperation)
 	}
 	if err != nil {
+		if errors.Is(err, service.ErrModelNotSelected) {
+			return true, nil, err
+		}
 		return false, nil, nil
 	}
 	if entry := audit.FromContext(c.Request.Context()); entry != nil {

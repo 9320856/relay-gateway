@@ -423,7 +423,7 @@ func TestInitDBRejectsLegacySchemaWithoutDataLoss(t *testing.T) {
 	}
 }
 
-func TestInitDBMigratesV2SchemaToV3Idempotently(t *testing.T) {
+func TestInitDBMigratesV2SchemaToCurrentIdempotently(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "v2-upgrade.db")
 	if err := InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -435,7 +435,7 @@ func TestInitDBMigratesV2SchemaToV3Idempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := InitDB(dbPath); err != nil {
-		t.Fatalf("v2 -> v3 migration failed: %v", err)
+		t.Fatalf("v2 -> current migration failed: %v", err)
 	}
 	t.Cleanup(func() { _ = Close() })
 	var marker SchemaMeta
@@ -470,6 +470,11 @@ func TestInitDBMigratesRealV2FixturePreservingData(t *testing.T) {
 	if err := legacy.AutoMigrate(legacyModels...); err != nil {
 		t.Fatalf("create v2 fixture schema: %v", err)
 	}
+	// Use the actual older channel shape, rather than adding the current
+	// selection column and merely changing the schema marker.
+	if err := legacy.Migrator().DropColumn(&ChannelModel{}, "SelectedModelsRaw"); err != nil {
+		t.Fatal(err)
+	}
 	createdAt := time.Now().UTC().Add(-time.Hour)
 	fixtureChannel := ChannelModel{
 		ID: "v2-channel", Name: "V2 Channel", Type: "openai",
@@ -491,7 +496,7 @@ func TestInitDBMigratesRealV2FixturePreservingData(t *testing.T) {
 		&fixtureLog,
 		&fixtureEvent,
 	} {
-		if err := legacy.Create(value).Error; err != nil {
+		if err := legacy.Omit("SelectedModelsRaw").Create(value).Error; err != nil {
 			t.Fatalf("insert v2 fixture row %T: %v", value, err)
 		}
 	}
@@ -518,7 +523,7 @@ func TestInitDBMigratesRealV2FixturePreservingData(t *testing.T) {
 	if err := DB.First(&channel, "id = ?", fixtureChannel.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if channel.Name != fixtureChannel.Name || channel.Priority != fixtureChannel.Priority || channel.Weight != fixtureChannel.Weight {
+	if channel.Name != fixtureChannel.Name || channel.Priority != fixtureChannel.Priority || channel.Weight != fixtureChannel.Weight || channel.SelectedModelsRaw != "" {
 		t.Fatalf("v2 channel changed during migration: %+v", channel)
 	}
 	var mapping ModelMappingModel
@@ -746,7 +751,7 @@ func TestSaveChannelInvalidatesSyncedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	UpdateChannelHealth(channel.ID, "healthy", 10, "", []string{"old-model"})
-	channel.Name = "renamed"
+	channel.BaseURL = "https://changed.example.invalid/v1"
 	if err := SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}

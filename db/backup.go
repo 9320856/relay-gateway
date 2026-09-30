@@ -16,8 +16,8 @@ import (
 )
 
 // DatabaseIntegrityReport is the result of inspecting a SQLite database.
-// SchemaVersion may be either the current version or the immediately
-// previous version, both of which InitDB knows how to handle.
+// SchemaVersion may be the current version or a supported older version that
+// InitDB can migrate without discarding application data.
 type DatabaseIntegrityReport struct {
 	SchemaVersion string
 	Integrity     string
@@ -138,8 +138,8 @@ func InspectDatabase(ctx context.Context, path string) (DatabaseIntegrityReport,
 		return report, fmt.Errorf("read schema marker: %w", err)
 	}
 	report.SchemaVersion = marker.Value
-	if marker.Value != SchemaVersion && marker.Value != previousSchemaVersion {
-		return report, fmt.Errorf("%w: found version %q, need %q or %q", ErrIncompatibleSchema, marker.Value, previousSchemaVersion, SchemaVersion)
+	if !supportedSchemaVersion(marker.Value) {
+		return report, fmt.Errorf("%w: found version %q, supported versions are %q, %q and %q", ErrIncompatibleSchema, marker.Value, previousSchemaVersion, "3", SchemaVersion)
 	}
 	return report, nil
 }

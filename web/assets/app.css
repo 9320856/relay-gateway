@@ -2158,6 +2158,11 @@ dialog::backdrop {
   gap: 16px;
 }
 
+.model-editor-head > .button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .model-editor-head strong {
   display: block;
   color: var(--text-primary);
@@ -2181,15 +2186,59 @@ dialog::backdrop {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-height: 140px;
+  max-height: 240px;
   overflow-y: auto;
   padding: 4px 0;
 }
 
-.model-catalog.empty-catalog::before {
-  content: "获取后会在这里展示探测到的模型。";
-  color: #7C8797;
-  font-size: 12px;
+.model-selection-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-selection-toolbar input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.model-selection-count {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  margin: 8px 0;
+}
+
+.model-catalog .model-choice {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.model-choice span {
+  overflow-wrap: anywhere;
+}
+
+.model-choice input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin: 0;
+  accent-color: #38bdf8;
+}
+
+.model-choice:has(input:checked), .model-choice:focus-within {
+  border-color: #38bdf8;
+  color: var(--text-primary);
+  background: rgba(56, 189, 248, 0.08);
 }
 
 .combobox-item {
