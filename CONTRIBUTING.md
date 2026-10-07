@@ -6,6 +6,7 @@
     go test -cover ./...
     go vet ./...
     node web\app_runtime_test.mjs
+    node web\profile_ui_regression_test.mjs
     go build -o relay-gateway.exe .
 
 GitHub Actions 会在 Linux 上执行重复测试、覆盖率、go vet 和 race detector。修改路由、鉴权、异步任务、SQLite 或适配器时，请优先补对应的回归测试；前端运行时逻辑修改请同步更新 web/app_runtime_test.mjs。

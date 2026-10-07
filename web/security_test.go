@@ -119,7 +119,7 @@ func TestWorkspaceRuntimeBehavior(t *testing.T) {
 	if err != nil {
 		t.Skip("node is not installed")
 	}
-	output, err := exec.Command(node, "ui_runtime_test.mjs").CombinedOutput()
+	output, err := exec.Command(node, "--test", "ui_runtime_test.mjs", "profile_ui_regression_test.mjs").CombinedOutput()
 	if err != nil {
 		t.Fatalf("workspace runtime behavior test failed: %v\n%s", err, output)
 	}

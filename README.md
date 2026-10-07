@@ -2,7 +2,7 @@
 
 一个基于 Go、本地优先的 AI 网关，内置 OpenAI、Anthropic 两种协议，并通过自定义 Protocol Profile 接入其他上游服务。提供多渠道路由、模型调试、异步任务、媒体资产与调用日志管理。
 
-> **V0.2.4 开发测试版，非正式发布。** 项目仍在快速迭代，后续可能进行较大范围的代码、配置、数据结构和接口重构。请仅在测试环境使用；升级前备份 SQLite 数据库、媒体目录和 `RELAY_DB_ENCRYPTION_KEY`，不要把它当作稳定生产版本。
+> **V0.2.4.1 开发测试版，非正式发布。** 项目仍在快速迭代，后续可能进行较大范围的代码、配置、数据结构和接口重构。请仅在测试环境使用；升级前备份 SQLite 数据库、媒体目录和 `RELAY_DB_ENCRYPTION_KEY`，不要把它当作稳定生产版本。
 
 ## 功能
 
@@ -21,6 +21,18 @@ OpenAI、Anthropic 是协议类型，可连接官方服务或采用兼容协议�
 渠道的「媒体保存」统一控制图片和视频，适用于内置协议和自定义 Profile：`disabled`（不保存）不自动下载；`best_effort`（尽力保存）自动下载到网关，保存失败仍可返回上游结果；`required`（必须保存）要求媒体成功保存后才能返回完成结果，保存失败时同步请求报错，异步任务保持 `materializing` 并隐藏上游媒体地址。新建渠道默认不保存，可在渠道编辑页修改；管理接口 `POST /api/channels` 使用 `media_retention` 字符串字段保存这三个值，创建时省略取 `disabled`，更新时省略保留已有设置。
 
 Profile 编辑器不再提供媒体保存选项，新建 Profile 的操作定义不包含 `media_retention`。旧 Profile JSON 中的该字段仍保留以兼容历史修订，但新调用统一使用渠道设置。全局环境变量 `RELAY_PROFILE_MEDIA_REQUIRED`、`RELAY_PROFILE_MEDIA_DISABLED` 已弃用，新的 Profile 和内置协议调用均忽略它们。
+
+## V0.2.4.1 更新
+
+本次修复控制台的协议编辑、表单校验和界面细节问题。
+
+- **渠道协议版本**：编辑渠道保留原来绑定的 Profile Revision；未修改协议时不重写绑定，读取失败也保留现有配置。
+- **Profile 操作一致性**：切换 Profile 立即重置绑定表单，忽略过期请求；发布时固定 Profile 和 Revision，刷新不会覆盖其他档案中尚未保存的内容。
+- **模型调试**：切换对话、图片和视频时禁用隐藏参数，避免未完成的图片或视频参数阻止当前类型提交。
+- **手机端日志**：首次打开、筛选和后台刷新保持列表可见，点击记录后才展开详情。
+- **界面细节**：搜索图标垂直居中；媒体资产为空时，画廊和表格都将提示居中显示在内容区。
+
+新增 Profile 异步交互回归测试，并补充日志、调试参数和媒体空状态的验证。
 
 ## V0.2.4 更新
 
@@ -214,6 +226,7 @@ node web/app_runtime_test.mjs
 node web/media_runtime_test.mjs
 node web/clipboard_runtime_test.mjs
 node web/ui_runtime_test.mjs
+node web/profile_ui_regression_test.mjs
 ```
 
 提交前还应运行：

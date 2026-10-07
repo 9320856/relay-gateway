@@ -385,9 +385,25 @@ fetchImpl = async (requestPath) => response(200, requestPath === "/api/auth/me"
   ? { username: "admin", csrf_token: "csrf" }
   : { data: [] });
 await vm.runInContext("initMedia()", context);
-assert.equal(document.getElementById("media-grid").classList.contains("hidden"), false, "invalid saved media view should show the grid");
+assert.equal(document.getElementById("media-view-grid").classList.contains("active"), true, "invalid saved media view should select the grid mode");
+assert.equal(document.getElementById("media-grid").classList.contains("hidden"), true, "an empty grid must not take space above the empty state");
 assert.equal(document.getElementById("media-table-wrap").classList.contains("hidden"), true, "invalid saved media view should hide the table");
+assert.equal(document.getElementById("media-empty").classList.contains("hidden"), false);
 assert.equal(mediaStorage.get("media_view_mode"), "grid", "invalid saved media view should be replaced with a usable mode");
+document.getElementById("media-view-table").dispatchEvent({type: "click"});
+assert.equal(document.getElementById("media-table-wrap").classList.contains("hidden"), true, "switching views must keep an empty table hidden");
+fetchImpl = async () => response(200, {data: [{id: 1, kind: "image", status: "available"}]});
+await document.getElementById("media-refresh").listeners.get("click")[0]();
+assert.equal(document.getElementById("media-empty").classList.contains("hidden"), true);
+assert.equal(document.getElementById("media-table-wrap").classList.contains("hidden"), false, "loaded assets restore the selected table view");
+assert.equal(document.getElementById("media-grid").classList.contains("hidden"), true);
+document.getElementById("media-view-grid").dispatchEvent({type: "click"});
+assert.equal(document.getElementById("media-grid").classList.contains("hidden"), false, "loaded assets remain accessible in the gallery");
+assert.equal(document.getElementById("media-table-wrap").classList.contains("hidden"), true);
+fetchImpl = async () => response(200, {data: []});
+await document.getElementById("media-refresh").listeners.get("click")[0]();
+assert.equal(document.getElementById("media-empty").classList.contains("hidden"), false);
+assert.equal(document.getElementById("media-grid").classList.contains("hidden"), true, "filtering to zero assets restores the centered empty state");
 
 const imagePollPathStart = fetchedPaths.length;
 let imagePollCalls = 0;
@@ -419,6 +435,16 @@ assert.ok(
 assert.equal(document.getElementById("playground-status").textContent, "图片生成完成");
 assert.equal(document.getElementById("playground-media").querySelectorAll("img").length, 1);
 
+
+fetchImpl = async (requestPath) => response(200, logDetail(String(requestPath).split("/").at(-1)));
+await vm.runInContext(`openLog("automatic", {reveal: false})`, context);
+assert.equal(vm.runInContext("activeLogRecord.id", context), "automatic", "automatic selection still loads the desktop detail");
+assert.equal(document.getElementById("logs-inspector").classList.contains("mobile-active"), false, "automatic selection must keep the mobile list visible");
+await vm.runInContext(`openLog("explicit")`, context);
+assert.equal(document.getElementById("logs-inspector").classList.contains("mobile-active"), true, "explicit activation must reveal the mobile detail");
+document.getElementById("logs-inspector").classList.remove("mobile-active");
+await vm.runInContext(`openLog(activeLogID, {background: true, token: activeLogRequestToken})`, context);
+assert.equal(document.getElementById("logs-inspector").classList.contains("mobile-active"), false, "background refresh must not reopen a dismissed detail");
 
 let resolveOld;
 let resolveCurrent;

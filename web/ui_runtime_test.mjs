@@ -57,6 +57,7 @@ class Element {
   contains(element) { return element === this || this.children.some((child) => child.contains(element)); }
   matches(selector) {
     if (selector === "[data-dashboard-panel]") return this.dataset.dashboardPanel !== undefined;
+    if (selector === "[data-playground-options]") return this.dataset.playgroundOptions !== undefined;
     if (selector === '[data-dashboard-view="settings"]') return this.dataset.dashboardView === "settings";
     if (selector.startsWith(".")) return selector.slice(1).split(".").every((name) => this.classList.contains(name));
     return this.tagName === selector.toUpperCase();
@@ -267,6 +268,51 @@ test("selected log detail refreshes in the background when its authoritative lis
   assert.equal(h.document.getElementById("visual-media-view").firstElementChild, video);
   h.run("activeLogRecord = {id:'selected', outcome:'success', status_code:200}; renderLogs([{id:'selected', outcome:'success', status_code:200}])");
   assert.equal(h.run("detailOpens.length"), 1, "unchanged lists do not refetch or replace playing media");
+});
+
+test("log list selection never reveals the mobile inspector until a record is activated", () => {
+  const h = harness("logs");
+  for (const id of ["log-list", "logs-empty", "page-info", "prev-page", "next-page"]) h.add(id);
+  h.run(`
+    detailOpens = []; openLog = (id, options) => detailOpens.push({id, ...options});
+    logTotal = 2; renderLogs([{id:'first'}, {id:'second'}]);
+  `);
+  assert.equal(h.run("detailOpens[0].id"), "first");
+  assert.equal(h.run("detailOpens[0].reveal"), false, "initial selection keeps the list visible");
+  const list = h.document.getElementById("log-list");
+  list.children[1].fire("click");
+  assert.equal(h.run("detailOpens[1].id"), "second");
+  assert.notEqual(h.run("detailOpens[1].reveal"), false, "an explicit click opens the inspector");
+  list.children[0].fire("keydown", {key: "Enter"});
+  assert.notEqual(h.run("detailOpens[2].reveal"), false, "keyboard activation also opens the inspector");
+  h.run("renderLogs([{id:'filtered'}])");
+  assert.equal(h.run("detailOpens[3].id"), "filtered");
+  assert.equal(h.run("detailOpens[3].reveal"), false, "a new filter result cannot reopen the inspector");
+});
+
+test("switching Playground kinds enables only current parameters and preserves entered values", () => {
+  const h = harness();
+  const form = h.add("playground-form", "form");
+  form.elements = {kind: new Element("input"), prompt: new Element("textarea")};
+  const image = h.add("image-options", "fieldset", form);
+  image.dataset.playgroundOptions = "image";
+  const count = h.add("image-count", "input", image);
+  count.value = "0";
+  const video = h.add("video-options", "fieldset", form);
+  video.dataset.playgroundOptions = "video";
+  const reference = h.add("video-reference", "input", video);
+  reference.value = "unfinished URL";
+  h.run("updatePlaygroundModels = () => {}; setPlaygroundKind('chat')");
+  assert.equal(image.disabled, true);
+  assert.equal(video.disabled, true);
+  h.run("setPlaygroundKind('image')");
+  assert.equal(image.disabled, false);
+  assert.equal(video.disabled, true);
+  assert.equal(count.value, "0", "switching kinds must not discard a user's unfinished parameters");
+  h.run("setPlaygroundKind('video')");
+  assert.equal(image.disabled, true);
+  assert.equal(video.disabled, false);
+  assert.equal(reference.value, "unfinished URL");
 });
 
 test("late settings responses preserve input entered before the load completes", async () => {

@@ -5184,7 +5184,7 @@ td { border-color: var(--color-border-weak); }
 /* Channel browsing and a single scrolling configuration drawer. */
 .channel-toolbar { display: flex; align-items: center; gap: 14px; margin: 24px 0 18px; }
 .search-control { position: relative; display: flex; align-items: center; width: min(360px, 100%); }
-.search-control > svg { position: absolute; left: 12px; color: var(--color-text-meta); pointer-events: none; }
+.search-control > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--color-text-meta); pointer-events: none; }
 .search-control input { padding-left: 38px; height: 38px; }
 .channel-status-control { display: flex; flex-direction: row; align-items: center; gap: 10px; font-size: 12px; white-space: nowrap; }
 .channel-status-control select { width: 132px; }
@@ -5438,6 +5438,8 @@ dialog.channel-config-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; wi
 .media-gallery-card { align-self: start; }
 .media-card-media-wrap, .media-card-audio-wrap, .media-card-body { flex-shrink: 0; }
 #media-table-wrap { flex: 1; min-height: 0; overflow: auto; }
+#media-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 16px; }
+#media-empty .empty-desc { margin-bottom: 0; }
 .media-pagination { margin-top: 14px; padding-top: 12px; }
 
 @media (min-width: 768px) and (max-width: 1199px) {

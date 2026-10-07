@@ -703,23 +703,28 @@ function renderChannelProfileOptions(selectedID = "", selectedRevision = 0, pres
 }
 
 async function restoreChannelProfileSelection(channelID, dialogVersion = channelDialogVersion) {
-  if (!channelID) return;
+  if (!channelID) return true;
+  const form = byId("channel-form");
+  const picker = byId("channel-protocol-picker");
+  const selectedProtocol = picker?.value;
+  const selectedProfileID = form?.elements?.profile_id?.value;
   try {
     const data = await request(`/api/profile-bindings?channel_id=${encodeURIComponent(channelID)}`);
-    const binding = (Array.isArray(data.data) ? data.data : []).find((item) => item.model_pattern === "*" && Number(item.precedence) === 0 && channelProfiles.some((profile) => profile.id === item.profile_id));
-    if (!binding || !byId("channel-dialog")?.open || dialogVersion !== channelDialogVersion) return;
-    const current = channelProfiles.find((profile) => profile.id === binding.profile_id);
-    renderChannelProfileOptions(binding.profile_id, current?.revision || binding.profile_revision);
-    byId("channel-form").elements.profile_id.dispatchEvent(new Event("change"));
+    const binding = (Array.isArray(data.data) ? data.data : []).find((item) => item.model_pattern === "*" && Number(item.precedence) === 0);
+    if (!binding || !byId("channel-dialog")?.open || dialogVersion !== channelDialogVersion || form?._profileSelectionChanged || picker?.value !== selectedProtocol || form?.elements?.profile_id?.value !== selectedProfileID) return true;
+    renderChannelProfileOptions(binding.profile_id, binding.profile_revision, true);
+    form.elements.profile_id.dispatchEvent(new Event("change"));
+    renderUnifiedProtocolPicker();
 
-    const picker = byId("channel-protocol-picker");
     if (picker) {
       picker.value = `profile:${binding.profile_id}`;
       picker._updateCustomSelectLabel?.();
     }
+    return true;
   } catch (_) {
     // The binding list is supplementary to editing a channel; keep the form
-    // usable when an old deployment does not expose the lookup endpoint.
+    // usable without replacing an unknown existing binding when lookup fails.
+    return false;
   }
 }
 
@@ -869,6 +874,9 @@ function openChannelDialog(channel = null) {
   if (byId("channel-model-search")) byId("channel-model-search").value = "";
   const form = byId("channel-form");
   form.reset();
+  form._profileSelectionChanged = false;
+  form._profileBindingRestore = null;
+  setBusy(form.querySelector("button[type=submit]"), false);
   if (form.elements.profile_id) {
     form.elements.profile_id.value = "";
     form.elements.profile_id.dispatchEvent(new Event("change"));
@@ -920,7 +928,14 @@ function openChannelDialog(channel = null) {
   byId("model-fetch-status").textContent = models.length ? `已加载 ${models.length} 个候选模型` : "尚未获取";
   form.scrollTop = 0;
   byId("channel-dialog").showModal();
-  if (channel) void restoreChannelProfileSelection(channel.id);
+  if (channel) {
+    const restoration = { dialogVersion: channelDialogVersion, pending: true, failed: false };
+    form._profileBindingRestore = restoration;
+    restoration.promise = restoreChannelProfileSelection(channel.id).then((restored) => {
+      restoration.failed = !restored;
+      restoration.pending = false;
+    });
+  }
   return true;
 }
 
@@ -1011,6 +1026,9 @@ async function deleteChannel(channel) {
 
 function bindChannelForm() {
   setupProtocolPicker();
+  byId("channel-protocol-picker")?.addEventListener("change", () => {
+    byId("channel-form")._profileSelectionChanged = true;
+  });
   const openAdd = () => {
     if (openChannelDialog()) void loadChannelProfiles().catch(() => {});
   };
@@ -1032,6 +1050,15 @@ function bindChannelForm() {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector("button[type=submit]");
+    const dialogVersion = channelDialogVersion;
+    const restoration = form._profileBindingRestore;
+    if (restoration?.dialogVersion === dialogVersion && restoration.pending) {
+      setBusy(button, true);
+      await restoration.promise;
+      if (dialogVersion !== channelDialogVersion || !byId("channel-dialog")?.open) return;
+      setBusy(button, false);
+    }
+    const keepExistingProfileBinding = restoration?.dialogVersion === dialogVersion && !form._profileSelectionChanged;
     let modelMapRaw = "{}";
     try {
       modelMapRaw = serializeModelMappings();
@@ -1061,7 +1088,7 @@ function bindChannelForm() {
       const saved = await request("/api/channels", { method: "POST", body: payload });
       const id = saved.channel?.id;
       let profileBindingError = null;
-      if (id) {
+      if (id && !keepExistingProfileBinding) {
         try {
           if (profileID) {
             const bound = await request(`/api/channels/${encodeURIComponent(id)}/bind-profile`, {
@@ -1082,7 +1109,9 @@ function bindChannelForm() {
       byId("channel-dialog").close();
       toast(profileBindingError
         ? `渠道已保存，但 Profile 绑定失败：${profileBindingError.message}`
-        : (payload.fetch_models ? "渠道已保存，正在同步模型" : "渠道已保存"));
+        : keepExistingProfileBinding && restoration.failed
+          ? "渠道已保存；原 Profile 绑定读取失败，已保留原绑定"
+          : (payload.fetch_models ? "渠道已保存，正在同步模型" : "渠道已保存"));
       if (payload.fetch_models && id) {
         try {
           const result = await request(`/api/channels/${encodeURIComponent(id)}/models?refresh=true`);
@@ -1123,6 +1152,7 @@ async function loadSettings() {
 let profiles = [];
 let profileRevisions = new Map();
 let profileBindings = [];
+let profileBindingsLoadVersion = 0;
 let selectedProfileID = "";
 let selectedProfileRevision = 0;
 let profileJSONPending = false;
@@ -1972,7 +2002,7 @@ async function loadProfileRevisions(profile) {
   profileRevisions.set(profile.id, revisions);
 }
 
-async function loadProfiles() {
+async function loadProfiles({ refreshProfileID = selectedProfileID, refreshProfileRevision = selectedProfileRevision } = {}) {
   const data = await request("/api/profiles");
   const rawProfiles = Array.isArray(data.data) ? data.data : [];
   // 仅保留两大官方标准协议（OpenAI 与 Anthropic）及所有用户自定义 Profile，剔除中间件杂项
@@ -1981,31 +2011,45 @@ async function loadProfiles() {
   );
   await Promise.all(profiles.map(loadProfileRevisions));
   const urlProfile = new URLSearchParams(window.location.search).get("profile");
-  if (urlProfile && profiles.some((p) => p.id === urlProfile)) {
-    selectedProfileID = urlProfile;
-  } else if (!selectedProfileID || !profiles.some((profile) => profile.id === selectedProfileID)) {
-    selectedProfileID = profiles[0]?.id || "";
+  const previousProfileID = selectedProfileID;
+  const previousRevision = selectedProfileRevision;
+  if (!selectedProfileID || !profiles.some((profile) => profile.id === selectedProfileID)) {
+    selectedProfileID = profiles.some((profile) => profile.id === urlProfile) ? urlProfile : profiles[0]?.id || "";
   }
   const revisions = profileRevisions.get(selectedProfileID) || [];
   if (!revisions.some((revision) => revision.revision === selectedProfileRevision)) selectedProfileRevision = revisions.slice().sort((a, b) => b.revision - a.revision)[0]?.revision || 0;
   renderProfileList();
-  renderProfileEditor();
-  if (selectedProfileID) await loadProfileBindings();
+  if (previousProfileID !== selectedProfileID || previousRevision !== selectedProfileRevision || (refreshProfileID === selectedProfileID && Number(refreshProfileRevision) === Number(selectedProfileRevision))) renderProfileEditor();
+  const bindingForm = byId("profile-binding-form");
+  if (previousProfileID !== selectedProfileID || (bindingForm && bindingForm.dataset.profileId !== selectedProfileID)) {
+    profileBindings = [];
+    populateProfileBindingForm();
+    renderProfileBindings();
+  }
+  await loadProfileBindings();
 }
 
 async function selectProfile(profileID) {
   selectedProfileID = profileID;
   const revisions = profileRevisions.get(profileID) || [];
   selectedProfileRevision = revisions.slice().sort((a, b) => b.revision - a.revision)[0]?.revision || 0;
+  profileBindings = [];
+  populateProfileBindingForm();
+  renderProfileBindings();
   renderProfileList(); renderProfileEditor();
   await loadProfileBindings();
 }
 
 async function loadProfileBindings() {
-  if (!selectedProfileID) return;
+  const loadVersion = ++profileBindingsLoadVersion;
+  if (!selectedProfileID) {
+    profileBindings = [];
+    renderProfileBindings();
+    return;
+  }
   const profileID = selectedProfileID;
   const data = await request(`/api/profile-bindings?profile_id=${encodeURIComponent(profileID)}`);
-  if (profileID !== selectedProfileID) return;
+  if (profileID !== selectedProfileID || loadVersion !== profileBindingsLoadVersion) return;
   profileBindings = Array.isArray(data.data) ? data.data : [];
   renderProfileBindings();
 }
@@ -2033,8 +2077,10 @@ function renderProfileBindings() {
 
 function populateProfileBindingForm(binding = null) {
   const form = byId("profile-binding-form");
-  if (!form) return;
+  if (!form || (binding?.profile_id && binding.profile_id !== selectedProfileID)) return;
   form.reset();
+  form.dataset.profileId = binding?.profile_id || selectedProfileID;
+  form.dataset.editVersion = String(Number(form.dataset.editVersion || 0) + 1);
   form.elements.id.value = binding?.id || "";
   form.elements.channel_id.replaceChildren();
   channels.forEach((channel) => appendOption(form.elements.channel_id, channel.id, channel.name || channel.id, channel.id === binding?.channel_id));
@@ -2164,17 +2210,19 @@ async function deleteSelectedProfileRevision() {
 }
 
 async function changeProfileRevisionState(action) {
+  const profileID = selectedProfileID;
   const revision = currentProfileRevision();
   if (!revision) return;
+  const revisionNumber = revision.revision;
   if (action === "retire" && !confirm(`确定停用版本 ${revision.revision} 吗？请先禁用或迁移该版本的渠道绑定；已接收的异步任务会继续执行。`)) return;
   if (action === "publish" && revision.state === "retired" && !confirm(`确定重新发布 Revision ${revision.revision} 吗？`)) return;
   try {
     if (action === "publish" && revision.state === "draft") {
       const profile = collectProfileFromEditor();
-      await request(`/api/profiles/${encodeURIComponent(selectedProfileID)}/revisions/${revision.revision}`, { method: "PUT", body: { revision: revision.revision, profile } });
+      await request(`/api/profiles/${encodeURIComponent(profileID)}/revisions/${revisionNumber}`, { method: "PUT", body: { revision: revisionNumber, profile } });
     }
-    await request(`/api/profiles/${encodeURIComponent(selectedProfileID)}/revisions/${revision.revision}/${action}`, { method: "POST" });
-    await loadProfiles();
+    await request(`/api/profiles/${encodeURIComponent(profileID)}/revisions/${revisionNumber}/${action}`, { method: "POST" });
+    await loadProfiles({ refreshProfileID: profileID, refreshProfileRevision: revisionNumber });
     toast(action === "publish" ? "版本已发布，启用渠道绑定后可接收新请求" : "版本已停用");
   } catch (err) { toast(err.message); }
 }
@@ -2235,12 +2283,23 @@ function bindProfileManager() {
   byId("profile-binding-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    const profileID = selectedProfileID;
+    if (!profileID || form.dataset.profileId !== profileID) {
+      populateProfileBindingForm();
+      toast("Profile 已切换，请重新填写绑定");
+      return;
+    }
+    const editVersion = form.dataset.editVersion;
     const data = formObject(form);
-    const payload = { channel_id: data.channel_id, operation: data.operation, model_pattern: data.model_pattern.trim(), profile_id: selectedProfileID, profile_revision: Number(data.profile_revision), precedence: Number(data.precedence || 0), enabled: form.elements.enabled.checked };
+    const payload = { channel_id: data.channel_id, operation: data.operation, model_pattern: data.model_pattern.trim(), profile_id: profileID, profile_revision: Number(data.profile_revision), precedence: Number(data.precedence || 0), enabled: form.elements.enabled.checked };
     try {
       const path = data.id ? `/api/profile-bindings/${data.id}` : "/api/profile-bindings";
       await request(path, { method: data.id ? "PUT" : "POST", body: payload });
-      populateProfileBindingForm(); await loadProfileBindings(); toast("Profile 绑定已保存");
+      if (profileID === selectedProfileID && editVersion === form.dataset.editVersion) {
+        populateProfileBindingForm();
+        await loadProfileBindings();
+      }
+      toast("Profile 绑定已保存");
     } catch (err) { toast(err.message); }
   });
   populateProfileBindingForm();
@@ -2423,7 +2482,9 @@ function setPlaygroundKind(kind) {
     button.setAttribute("aria-selected", String(active));
   });
   document.querySelectorAll("[data-playground-options]").forEach((panel) => {
-    panel.classList.toggle("hidden", panel.dataset.playgroundOptions !== kind);
+    const active = panel.dataset.playgroundOptions === kind;
+    panel.classList.toggle("hidden", !active);
+    panel.disabled = !active;
   });
   const prompts = { chat: "输入对话测试内容", image: "描述希望生成的图片", video: "描述希望生成的视频" };
   form.elements.prompt.placeholder = prompts[kind];
@@ -3972,7 +4033,7 @@ function renderLogs(rows) {
 
   // Keep the selected detail and media mounted while it remains in the list.
   if (selectedRow) {
-    if (selectedRow.id !== activeLogID || activeLogRecord?.id !== selectedRow.id) openLog(selectedRow.id);
+    if (selectedRow.id !== activeLogID || activeLogRecord?.id !== selectedRow.id) openLog(selectedRow.id, { reveal: false });
     else if (logListDetailChanged(selectedRow, activeLogRecord)) {
       stopActiveLogRefresh();
       const token = ++activeLogRequestToken;
@@ -4107,7 +4168,7 @@ async function openLog(id, options = {}) {
     if (empty) empty.classList.add("hidden");
     if (content) content.classList.remove("hidden");
     const inspectorPane = byId("logs-inspector");
-    if (inspectorPane && !background) inspectorPane.classList.add("mobile-active");
+    if (inspectorPane && !background && options.reveal !== false) inspectorPane.classList.add("mobile-active");
 
     // Title / ID
     const titleEl = byId("detail-title");
@@ -5124,13 +5185,17 @@ async function initMedia() {
   const previewContent = byId("media-preview-content");
 
   let currentViewMode = localStorage.getItem("media_view_mode") === "table" ? "table" : "grid";
+  const updateMediaView = () => {
+    const hasAssets = empty.classList.contains("hidden");
+    grid?.classList.toggle("hidden", currentViewMode !== "grid" || !hasAssets);
+    tableWrap?.classList.toggle("hidden", currentViewMode !== "table" || !hasAssets);
+  };
   const setViewMode = (mode) => {
     currentViewMode = mode;
     localStorage.setItem("media_view_mode", mode);
     btnGrid?.classList.toggle("active", mode === "grid");
     btnTable?.classList.toggle("active", mode === "table");
-    grid?.classList.toggle("hidden", mode !== "grid");
-    tableWrap?.classList.toggle("hidden", mode !== "table");
+    updateMediaView();
   };
   btnGrid?.addEventListener("click", () => setViewMode("grid"));
   btnTable?.addEventListener("click", () => setViewMode("table"));
@@ -5467,6 +5532,7 @@ async function initMedia() {
     cleanupMedia(list);
     if (grid) cleanupMedia(grid);
     empty.classList.toggle("hidden", assets.length !== 0);
+    updateMediaView();
 
     for (const asset of assets) {
       const isVideo = asset.kind === "video";
