@@ -812,6 +812,8 @@ function openChannelDialog(channel = null) {
   byId("channel-id-row").classList.toggle("hidden", !channel);
   form.elements.priority.value = channel?.priority || 1;
   form.elements.weight.value = channel?.weight || 1;
+  form.elements.media_retention.value = channel?.media_retention || "disabled";
+  form.elements.media_retention.dispatchEvent(new Event("change"));
   form.elements.enabled.checked = channel ? Boolean(channel.enabled) : true;
   form.elements.fetch_models.checked = channel ? Boolean(channel.fetch_models) : true;
   const picker = byId("channel-protocol-picker");
@@ -1069,7 +1071,6 @@ function defaultProfileContent(name = "", kind = "chat", mode = "direct") {
       operation: endpoint.operation,
       execution_mode: async ? "async" : "direct",
       polling_mode: async ? "background" : "off",
-      media_retention: "disabled",
       submit: { method: "POST", path, body_encoding: "json", body: {} },
       response: async
         ? { task_id_paths: kind === "image" ? ["job.id", "task_id", "id"] : ["id", "task_id"] }
@@ -1131,7 +1132,7 @@ function profileSelect(labelText, className, values, selected) {
   label.textContent = labelText;
   const select = document.createElement("select");
   select.className = className;
-  const labels = { direct: "同步：直接返回结果", async: "异步：返回任务 ID", off: "关闭轮询", client: "客户端查询", gateway_wait: "网关等待结果", background: "后台轮询", disabled: "不托管", best_effort: "尽力托管", required: "必须托管" };
+  const labels = { direct: "同步：直接返回结果", async: "异步：返回任务 ID", off: "关闭轮询", client: "客户端查询", gateway_wait: "网关等待结果", background: "后台轮询" };
   values.forEach((value) => appendOption(select, value, labels[value] || value, value === selected));
   select.value = values.includes(selected) ? selected : values[0];
   label.append(select);
@@ -1274,6 +1275,11 @@ function renderProfileOperations(profile) {
   operations.forEach((operation, index) => {
     const card = document.createElement("article");
     card.className = "profile-operation-card";
+    // Preserve old draft JSON for historical revisions without exposing an
+    // execution setting here. New requests use the channel's media setting.
+    if (Object.prototype.hasOwnProperty.call(operation, "media_retention")) {
+      card._legacyMediaRetention = operation.media_retention;
+    }
     // Smart default: when multiple operations exist, keep 1st expanded and collapse the rest
     if (operations.length > 1 && index > 0) {
       card.classList.add("collapsed");
@@ -1367,7 +1373,6 @@ function renderProfileOperations(profile) {
       profileField("操作名称", "profile-op-name", operation.operation),
       profileField("执行模式", "profile-op-execution", operation.execution_mode || "direct"),
       profileField("轮询模式", "profile-op-polling", operation.polling_mode || "off"),
-      profileSelect("媒体保留", "profile-op-retention", ["disabled", "best_effort", "required"], operation.media_retention || "disabled"),
       profileField("策略 Policy", "profile-op-policy", operation.policy || "")
     );
     body.append(basic);
@@ -1529,7 +1534,6 @@ function collectProfileFromEditor() {
       operation: value(".profile-op-name").trim(),
       execution_mode: execution,
       polling_mode: polling,
-      media_retention: value(".profile-op-retention") || "disabled",
       submit: {
         method: value(".profile-op-submit-method") || "POST",
         path: value(".profile-op-submit-path") || "/",
@@ -1543,6 +1547,9 @@ function collectProfileFromEditor() {
       },
       policy: value(".profile-op-policy").trim()
     };
+    if (Object.prototype.hasOwnProperty.call(card, "_legacyMediaRetention")) {
+      operation.media_retention = card._legacyMediaRetention;
+    }
     if (operation.operation === "chat.completions" && execution === "async") throw new Error("聊天入口目前仅支持同步协议；异步请求请选择图片或视频");
     const pollPath = value(".profile-op-poll-path").trim();
     if (execution === "async" && polling !== "off") {

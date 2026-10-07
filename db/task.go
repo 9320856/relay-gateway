@@ -191,6 +191,9 @@ type TaskRun struct {
 	ProfileID       string `gorm:"size:64;index" json:"profile_id,omitempty"`
 	ProfileRevision int    `gorm:"default:0" json:"profile_revision,omitempty"`
 	ProfileDigest   string `gorm:"size:128" json:"profile_digest,omitempty"`
+	// Empty identifies tasks created before channel-owned retention. Their
+	// captured Profile snapshot remains authoritative for media retention.
+	MediaRetention string `gorm:"size:16;not null;default:''" json:"media_retention,omitempty"`
 	// IdempotencyKey and RequestFingerprint are populated for Profile-backed
 	// creates when the caller supplies an Idempotency-Key. They let a retry
 	// reuse the durable TaskRun after a process restart without relying on a
@@ -291,6 +294,11 @@ func CreateTaskRunContext(ctx context.Context, run *TaskRun) error {
 		return errors.New("task run id is required")
 	}
 	run.ID = strings.TrimSpace(run.ID)
+	if run.MediaRetention != "" {
+		if _, err := media.NormalizeRetention(run.MediaRetention); err != nil {
+			return err
+		}
+	}
 	if run.Engine == "" {
 		run.Engine = "legacy"
 	}
@@ -366,6 +374,13 @@ func UpdateProfileTaskRunProjectionContext(ctx context.Context, run *TaskRun) er
 	if run == nil || strings.TrimSpace(run.ID) == "" {
 		return errors.New("task run id is required")
 	}
+	// The reservation already captured the policy. Preserve even a historical
+	// blank value instead of applying the channel's current setting later.
+	var stored TaskRun
+	if err := db.Select("id", "media_retention").First(&stored, "id = ?", strings.TrimSpace(run.ID)).Error; err != nil {
+		return err
+	}
+	run.MediaRetention = stored.MediaRetention
 	updates := map[string]any{
 		"origin_request_id":       run.OriginRequestID,
 		"task_kind":               run.TaskKind,

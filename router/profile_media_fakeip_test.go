@@ -21,23 +21,34 @@ import (
 )
 
 type profileMediaStaticDNS struct {
-	ip    string
+	ips   []string
 	calls atomic.Int32
 }
 
 func (r *profileMediaStaticDNS) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
 	r.calls.Add(1)
-	return []net.IPAddr{{IP: net.ParseIP(r.ip)}}, nil
+	addresses := make([]net.IPAddr, 0, len(r.ips))
+	for _, ip := range r.ips {
+		addresses = append(addresses, net.IPAddr{IP: net.ParseIP(ip)})
+	}
+	return addresses, nil
 }
 
 func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 	for _, tc := range []struct {
-		name, ip, trusted string
-		wantError         bool
+		name, trusted, host, redirectHost string
+		ips                               []string
+		wantError                         bool
 	}{
-		{"trusted_fake_ip", "198.18.0.160", "cdn.media-provider.com", false},
-		{"trusted_public_ip", "8.8.8.8", "cdn.media-provider.com", false},
-		{"untrusted_fake_ip", "198.18.0.160", "", true},
+		{name: "explicit_fake_ip", trusted: "cdn.media-provider.com", host: "cdn.media-provider.com", ips: []string{"198.18.0.160"}},
+		{name: "public_ip", host: "cdn.media-provider.com", ips: []string{"8.8.8.8"}},
+		{name: "upstream_cdn_ipv4", host: "download.xmimage2.cc.cd", ips: []string{"198.18.0.97"}},
+		{name: "upstream_cdn_ipv6", host: "download.xmimage2.cc.cd", ips: []string{"2001:2::60"}},
+		{name: "future_cdn_dual_stack", host: "media.another-provider.net", ips: []string{"198.18.0.97", "2001:2::60"}},
+		{name: "private_public_suffix", host: "media.customer.github.io", ips: []string{"198.18.0.97"}},
+		{name: "redirect_new_cdn", host: "cdn.media-provider.com", redirectHost: "edge.customer.github.io", ips: []string{"2001:2::60"}},
+		{name: "private_ipv4_blocked", host: "cdn.media-provider.com", ips: []string{"192.168.1.9"}, wantError: true},
+		{name: "private_ipv6_blocked", host: "cdn.media-provider.com", ips: []string{"fd00::9"}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("RELAY_DB_ENCRYPTION_KEY", "direct-image-fake-ip-test-key")
@@ -57,14 +68,18 @@ func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 			var mediaRequests, dialCalls atomic.Int32
 			mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mediaRequests.Add(1)
-				if r.Host != "cdn.media-provider.com" || r.URL.Path != "/result.png" {
+				if r.Host == tc.host && r.URL.Path == "/result.png" && tc.redirectHost != "" {
+					http.Redirect(w, r, "http://"+tc.redirectHost+"/final.png", http.StatusFound)
+					return
+				}
+				if (r.Host != tc.host || r.URL.Path != "/result.png") && (r.Host != tc.redirectHost || r.URL.Path != "/final.png") {
 					t.Errorf("unexpected media request: %s %s", r.Host, r.URL.Path)
 				}
 				w.Header().Set("Content-Type", "image/png")
 				_, _ = io.WriteString(w, imageBytes)
 			}))
 			t.Cleanup(mediaServer.Close)
-			const sourceURL = "http://cdn.media-provider.com/result.png"
+			sourceURL := "http://" + tc.host + "/result.png"
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/images" {
 					t.Errorf("unexpected submit: %s %s", r.Method, r.URL.Path)
@@ -73,7 +88,7 @@ func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"url": sourceURL}}})
 			}))
 			t.Cleanup(upstream.Close)
-			channel := &db.ChannelModel{ID: "direct-image", Name: "Direct Image", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "direct-image-model"}
+			channel := &db.ChannelModel{ID: "direct-image", Name: "Direct Image", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "direct-image-model", MediaRetention: protocol.MediaRetentionRequired}
 			if err := db.SaveChannelModel(channel); err != nil {
 				t.Fatal(err)
 			}
@@ -92,7 +107,7 @@ func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 			if err := db.SaveChannelProtocolBinding(&db.ChannelProtocolBinding{ChannelID: channel.ID, Operation: "image.create", ModelPattern: "direct-image-model", ProfileID: "direct-image-profile", ProfileRevision: 1, Enabled: true}); err != nil {
 				t.Fatal(err)
 			}
-			resolver := &profileMediaStaticDNS{ip: tc.ip}
+			resolver := &profileMediaStaticDNS{ips: tc.ips}
 			previous := profileMediaFetcherFactory
 			profileMediaFetcherFactory = func(source, base string) relaymedia.SourceFetcher {
 				if source != sourceURL || base != channel.BaseURL {
@@ -102,7 +117,11 @@ func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 				fetcher.Resolver = resolver
 				fetcher.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 					dialCalls.Add(1)
-					if address != net.JoinHostPort(tc.ip, "80") {
+					pinned := false
+					for _, ip := range tc.ips {
+						pinned = pinned || address == net.JoinHostPort(ip, "80")
+					}
+					if !pinned {
 						t.Errorf("dial did not pin validated IP: %q", address)
 					}
 					return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(mediaServer.URL, "http://"))
@@ -140,11 +159,15 @@ func TestProfileDirectRequiredImageMediaFakeIP(t *testing.T) {
 			}
 			if tc.wantError {
 				if response.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "non-public address") || mediaRequests.Load() != 0 || dialCalls.Load() != 0 {
-					t.Fatalf("untrusted media result: status=%d body=%s requests=%d dials=%d", response.StatusCode, body, mediaRequests.Load(), dialCalls.Load())
+					t.Fatalf("blocked private media result: status=%d body=%s requests=%d dials=%d", response.StatusCode, body, mediaRequests.Load(), dialCalls.Load())
 				}
 				return
 			}
-			if response.StatusCode != http.StatusOK || mediaRequests.Load() != 1 || dialCalls.Load() != 1 {
+			wantRequests := int32(1)
+			if tc.redirectHost != "" {
+				wantRequests = 2
+			}
+			if response.StatusCode != http.StatusOK || mediaRequests.Load() != wantRequests || dialCalls.Load() != wantRequests || resolver.calls.Load() != wantRequests {
 				t.Fatalf("materialization result: status=%d body=%s requests=%d dials=%d", response.StatusCode, body, mediaRequests.Load(), dialCalls.Load())
 			}
 			var generated struct {

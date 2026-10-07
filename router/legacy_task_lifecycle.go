@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"relay-gateway/db"
+	"relay-gateway/media"
 )
 
 // LegacyTaskBackfillReport describes the idempotent startup reconciliation of
@@ -85,6 +87,9 @@ func BackfillLegacyTaskLifecycle(ctx context.Context) (LegacyTaskBackfillReport,
 			ensureLegacyTaskRun(registration)
 			if normalized, outcome := normalizeLegacyTaskState(registration.InitialStatus); normalized != "queued" {
 				if current, loadErr := db.GetTaskRun(runID); loadErr == nil && current.TaskStatus != normalized {
+					if policy, err := db.TaskMediaRetention(ctx, current); err != nil || (policy == media.RetentionRequired && normalized == "completed" && !legacyRequiredMediaReady(ctx, current, registration.TaskKind)) {
+						normalized, outcome = "materializing", "pending"
+					}
 					if statusErr := db.UpdateTaskRunStatus(runID, normalized, outcome); statusErr == nil {
 						_, _ = db.AppendTaskEvent(ctx, runID, "status_changed", normalized)
 					}
@@ -140,13 +145,38 @@ func legacyHistoricalStatus(ctx context.Context, registration asyncTaskMappingRe
 // this projection is deliberately best-effort so a local write outage cannot
 // turn an already accepted paid request into a retryable failure.
 func ensureLegacyTaskRun(registration asyncTaskMappingRegistration) {
+	_ = ensureLegacyTaskRunContext(context.Background(), registration)
+}
+
+func ensureLegacyTaskRunContext(ctx context.Context, registration asyncTaskMappingRegistration) error {
 	if registration.empty() || !db.IsValidTaskID(registration.TaskAlias) {
-		return
+		return fmt.Errorf("invalid legacy task registration")
+	}
+	if registrationHasProfileTaskRun(ctx, registration) {
+		return nil
 	}
 	runID := legacyTaskRunID(registration)
-	run, err := db.GetTaskRun(runID)
+	// Status responses may reveal an additional provider alias. Extend the
+	// original frozen run instead of creating a second lifecycle owner.
+	for _, lookupID := range registration.TaskIDs {
+		if existing, err := db.GetTaskRunByAliasContext(ctx, lookupID); err == nil && existing.Engine == "legacy" && existing.ChannelID == registration.ChannelID && existing.TaskKind == registration.TaskKind {
+			runID = existing.ID
+			break
+		}
+	}
+	run, err := db.GetTaskRunContext(ctx, runID)
 	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 		status, outcome := normalizeLegacyTaskState(registration.InitialStatus)
+		policy, policyErr := media.NormalizeRetention(registration.MediaRetention)
+		if policyErr != nil {
+			return policyErr
+		}
+		if policy == media.RetentionRequired && status == "completed" {
+			status, outcome = "materializing", "pending"
+		}
 		run = &db.TaskRun{
 			ID:              runID,
 			OriginRequestID: registration.OriginRequestID,
@@ -154,6 +184,7 @@ func ensureLegacyTaskRun(registration asyncTaskMappingRegistration) {
 			Operation:       legacyTaskOperation(registration.TaskKind),
 			ChannelID:       registration.ChannelID,
 			Engine:          "legacy",
+			MediaRetention:  policy,
 			PollingMode:     "client",
 			// TaskIDs contains internal lookup aliases (for images this can be
 			// imgjob_<provider-id>). The provider ID itself is the canonical
@@ -163,23 +194,26 @@ func ensureLegacyTaskRun(registration asyncTaskMappingRegistration) {
 			TaskStatus:      status,
 			TaskOutcome:     outcome,
 		}
-		if err := db.CreateTaskRun(run); err != nil {
+		if err := db.CreateTaskRunContext(ctx, run); err != nil {
 			// A concurrent request may have created the same deterministic
 			// projection. Continue with alias/event reconciliation in that case.
-			if loaded, loadErr := db.GetTaskRun(runID); loadErr == nil {
+			if loaded, loadErr := db.GetTaskRunContext(ctx, runID); loadErr == nil {
 				run = loaded
 			} else {
-				return
+				return err
 			}
 		}
-		_, _ = db.AppendTaskEvent(context.Background(), runID, "submitted", "legacy async task accepted")
+		_, _ = db.AppendTaskEvent(ctx, runID, "submitted", "legacy async task accepted")
 	}
 	for _, lookupID := range registration.TaskIDs {
 		if isTaskIDRegisteredToOtherChannel(lookupID, registration.TaskKind, registration.ChannelID) {
 			continue
 		}
-		_ = db.RecordTaskAlias(&db.TaskAlias{TaskRunID: runID, LookupID: lookupID, Source: "create"})
+		if err := db.RecordTaskAliasContext(ctx, &db.TaskAlias{TaskRunID: runID, LookupID: lookupID, Source: "create"}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func recordLegacyTaskPoll(lookupTaskID, taskKind, status string, response any) {
@@ -216,6 +250,18 @@ func recordLegacyTaskPoll(lookupTaskID, taskKind, status string, response any) {
 	}
 	started := time.Now()
 	normalized, outcome := normalizeLegacyTaskState(status)
+	if policy, err := db.TaskMediaRetention(context.Background(), run); err == nil && policy == media.RetentionRequired && normalized == "completed" {
+		if assets, err := db.ListMediaAssetsForTaskRun(run.ID, taskKind); err != nil || len(assets) == 0 {
+			normalized, outcome = "materializing", "pending"
+		} else {
+			for _, asset := range assets {
+				if asset.Status != db.MediaAssetAvailable || asset.ObjectID == "" {
+					normalized, outcome = "materializing", "pending"
+					break
+				}
+			}
+		}
+	}
 	_ = db.RecordTaskPoll(runID, true, 0)
 	if normalized != "" && normalized != run.TaskStatus {
 		if err := db.UpdateTaskRunStatus(runID, normalized, outcome); err == nil {
@@ -301,7 +347,7 @@ func legacyRegistrationFromMapping(mapping *db.TaskMapping, initialStatus string
 	if !db.IsValidTaskMappingLookupID(registration.TaskIDs[0], taskKind) {
 		return asyncTaskMappingRegistration{}
 	}
-	return registration
+	return pendingLegacyRegistration(registration)
 }
 
 func legacyTaskRunID(registration asyncTaskMappingRegistration) string {
@@ -331,6 +377,8 @@ func normalizeLegacyTaskState(raw string) (status, outcome string) {
 		return "cancelled", "cancelled"
 	case "processing", "running", "in_progress", "in-progress":
 		return "processing", "pending"
+	case "materializing":
+		return "materializing", "pending"
 	default:
 		return "queued", "pending"
 	}

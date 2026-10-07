@@ -45,6 +45,14 @@ func CopyHeaders(dst http.ResponseWriter, src http.Header) {
 	}
 }
 
+// CopyTransformedHeaders applies the normal forwarding policy but discards the
+// upstream body length after conversion. The server frames the replacement body;
+// unchanged passthrough responses should continue to use CopyHeaders.
+func CopyTransformedHeaders(dst http.ResponseWriter, src http.Header) {
+	CopyHeaders(dst, src)
+	dst.Header().Del("Content-Length")
+}
+
 // Stream flushes each received block. The caller bounds the reader and owns its
 // close; HTTP request cancellation interrupts a blocked upstream Body.Read.
 func Stream(ctx context.Context, src io.Reader, dst http.ResponseWriter) (int64, error) {

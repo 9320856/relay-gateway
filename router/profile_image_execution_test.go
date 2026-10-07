@@ -108,7 +108,7 @@ func TestProfileEngineImageSubmitResultCreatesMediaContext(t *testing.T) {
 		})
 	}))
 	t.Cleanup(upstream.Close)
-	channel := &db.ChannelModel{ID: "profile-image-submit-channel", Name: "Profile Image Submit", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "profile-image-submit-model"}
+	channel := &db.ChannelModel{ID: "profile-image-submit-channel", Name: "Profile Image Submit", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "profile-image-submit-model", MediaRetention: protocol.MediaRetentionBestEffort}
 	if err := db.SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}

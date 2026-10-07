@@ -19,6 +19,7 @@ import (
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/db"
+	"relay-gateway/internal/httpforward"
 	"relay-gateway/protocol"
 	"relay-gateway/service"
 )
@@ -84,6 +85,7 @@ func profileEngineMultipartDirect(c *gin.Context, operation string, form *multip
 		if op.ExecutionMode != protocol.ExecutionDirect {
 			continue
 		}
+		op = applyChannelMediaRetention(op, candidate)
 		bound = true
 		targetModel := modelName
 		if mapped := strings.TrimSpace(candidate.ModelMap[modelName]); mapped != "" {
@@ -96,11 +98,20 @@ func profileEngineMultipartDirect(c *gin.Context, operation string, form *multip
 		if entry := audit.FromContext(c.Request.Context()); entry != nil {
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
+		var captured *boundedMediaResponseWriter
+		var output http.ResponseWriter = c.Writer
+		if profileDirectMediaOperation(operation) && op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled {
+			captured = newBoundedMediaResponseWriter(8 << 20)
+			output = captured
+		}
 		_, execErr := service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
 			BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), Headers: candidate.Headers,
 			RawBody: payload, RawContentType: contentType,
-		}, c.Writer, false)
+		}, output, false)
 		if execErr == nil {
+			if captured != nil {
+				return true, retainProfileCapturedResponse(c, candidate, binding.Operation, op, captured, c.Writer)
+			}
 			return true, nil
 		}
 		lastErr = execErr
@@ -316,11 +327,20 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 			// dedicated /images/jobs Profile bridge) during migration.
 			continue
 		}
+		op = applyChannelMediaRetention(op, candidate)
 		bound = true
 		var body map[string]any
 		if err := json.Unmarshal(rawBody, &body); err != nil {
 			return true, candidate, fmt.Errorf("profile request body must be a JSON object: %w", err)
 		}
+		// Forward the exact normalized model used for selection, including when
+		// the input used an escaped/case-insensitive key or surrounding spaces.
+		for key := range body {
+			if key != "model" && strings.EqualFold(key, "model") {
+				delete(body, key)
+			}
+		}
+		body["model"] = modelName
 		if mapped := strings.TrimSpace(candidate.ModelMap[modelName]); mapped != "" {
 			body["model"] = mapped
 		}
@@ -338,11 +358,23 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 			}
 			entry.RecordDispatch(candidate.ID, candidate.Type, candidate.BaseURL, targetModel)
 		}
+		var captured *boundedMediaResponseWriter
+		output := writer
+		stream := isStreamRequested(rawBody)
+		if profileDirectMediaOperation(operation) && op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled {
+			captured = newBoundedMediaResponseWriter(8 << 20)
+			output, stream = captured, false
+		}
 		_, err = service.DefaultDispatcher.ProfileExecutor(newProfileOperationExecutor(op), candidate.ID).ExecuteRaw(c.Request.Context(), compiled, binding.Operation, protocol.Request{
 			BaseURL: candidate.BaseURL, APIKeys: candidate.GetEffectiveKeys(), APIKeyHeader: apiKeyHeader,
 			Headers: headers, Body: body,
-		}, writer, isStreamRequested(rawBody))
+		}, output, stream)
 		if err == nil {
+			if captured != nil {
+				// The provider has accepted the paid submit. A retention failure is
+				// returned directly and never advances to another candidate.
+				return true, candidate, retainProfileCapturedResponse(c, candidate, binding.Operation, op, captured, writer)
+			}
 			return true, candidate, nil
 		}
 		lastErr = err
@@ -357,6 +389,53 @@ func profileEngineDirectForChannelResult(c *gin.Context, operation, apiKeyHeader
 		return true, nil, lastErr
 	}
 	return false, nil, nil
+}
+
+func profileDirectMediaOperation(operation string) bool {
+	return strings.HasPrefix(operation, "image.") || strings.HasPrefix(operation, "images.") || operation == "video.create"
+}
+
+func retainProfileCapturedResponse(c *gin.Context, channel *config.UpstreamChannel, operation string, op protocol.Operation, captured *boundedMediaResponseWriter, writer http.ResponseWriter) error {
+	if captured.Err != nil {
+		return captured.Err
+	}
+	kind := asyncTaskKindImage
+	if operation == "video.create" {
+		kind = asyncTaskKindVideo
+	}
+	var payload map[string]any
+	decodeErr := json.Unmarshal(captured.Body.Bytes(), &payload)
+	if decodeErr != nil || payload == nil {
+		if op.EffectiveMediaRetention() == protocol.MediaRetentionRequired {
+			return errors.New("required media response must be a JSON object with downloadable media")
+		}
+		payload = nil
+	} else {
+		ownerID := profileTaskRunID(channel.ID, profileIdempotencyKey(c), operation)
+		sources := collectChannelMediaSources(payload, kind, channel.BaseURL)
+		if err := retainMediaResponse(c, ownerID, kind, channel.BaseURL, op.EffectiveMediaRetention(), payload, sources); err != nil {
+			return err
+		}
+	}
+	status := captured.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if op.EffectiveMediaRetention() != protocol.MediaRetentionRequired || payload == nil {
+		httpforward.CopyHeaders(writer, captured.Header())
+		writer.WriteHeader(status)
+		_, err := writer.Write(captured.Body.Bytes())
+		return err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	httpforward.CopyTransformedHeaders(writer, captured.Header())
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(status)
+	_, err = writer.Write(body)
+	return err
 }
 
 func profileDirectFailoverEligible(err error) bool {

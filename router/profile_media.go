@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -233,10 +232,10 @@ func rewriteProfileMediaValue(value any, replacements map[string]string) any {
 	}
 }
 
-func profileMediaRequired() bool { return os.Getenv("RELAY_PROFILE_MEDIA_REQUIRED") == "1" }
+func profileMediaRequired() bool { return false }
 
 func profileMediaRetentionEnabled(op protocol.Operation) bool {
-	return os.Getenv("RELAY_PROFILE_MEDIA_DISABLED") != "1" && op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled
+	return op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled
 }
 
 func isManagedMediaURL(raw string) bool {

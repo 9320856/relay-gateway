@@ -126,6 +126,7 @@ func reserveProfileTaskRun(ctx context.Context, candidate *config.UpstreamChanne
 		ProfileID:          binding.ProfileID,
 		ProfileRevision:    revision.Revision,
 		ProfileDigest:      compiled.Digest(),
+		MediaRetention:     op.EffectiveMediaRetention(),
 		IdempotencyKey:     idempotencyKey,
 		RequestFingerprint: fingerprint,
 		PollingMode:        op.PollingMode,

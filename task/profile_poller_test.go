@@ -37,6 +37,44 @@ func TestProfilePollBudgetStopsExpiredBackgroundTask(t *testing.T) {
 	}
 }
 
+func TestRequiredProfilePollWithoutMediaCannotComplete(t *testing.T) {
+	op := protocol.Operation{MediaRetention: protocol.MediaRetentionRequired, Poll: &protocol.Poll{SuccessValues: []string{"completed"}, IntervalMS: 1}}
+	run := &db.TaskRun{ID: "missing-media", TaskKind: "image", MediaRetention: protocol.MediaRetentionRequired}
+	observation, err := projectProfilePollResult(context.Background(), run, op, protocol.Result{Status: "completed", HTTPStatus: http.StatusOK})
+	if err == nil || observation.Status != model.VideoStatusProcessing || observation.Outcome != "pending" || observation.Success || !strings.Contains(observation.Error, "no source URL or content endpoint") {
+		t.Fatalf("required background result completed without media: observation=%+v err=%v", observation, err)
+	}
+}
+
+func TestProfilePollRequiredAvailableBatchCompletesWithoutAnotherWorker(t *testing.T) {
+	previous := ensureTaskResultMedia
+	t.Cleanup(func() { ensureTaskResultMedia = previous })
+	ensureTaskResultMedia = func(context.Context, string, string, []string) ([]db.MediaAsset, error) {
+		return []db.MediaAsset{{Status: db.MediaAssetAvailable, ObjectID: "one"}, {Status: db.MediaAssetAvailable, ObjectID: "two"}}, nil
+	}
+	op := protocol.Operation{MediaRetention: protocol.MediaRetentionRequired, Poll: &protocol.Poll{SuccessValues: []string{"completed"}}}
+	observation, err := projectProfilePollResult(context.Background(), &db.TaskRun{ID: "ready-batch", TaskKind: "image"}, op, protocol.Result{Status: "completed", ResultURLs: []string{"https://cdn.example/one.png", "https://cdn.example/two.png"}})
+	if err != nil || observation.Status != model.VideoStatusCompleted || observation.Outcome != "success" || !observation.Success || observation.PausePolling {
+		t.Fatalf("already materialized task remained pending: observation=%+v err=%v", observation, err)
+	}
+}
+
+func TestProfilePollPendingPreviewDoesNotEnqueue(t *testing.T) {
+	previous := ensureTaskResultMedia
+	t.Cleanup(func() { ensureTaskResultMedia = previous })
+	ensureTaskResultMedia = func(context.Context, string, string, []string) ([]db.MediaAsset, error) {
+		t.Fatal("pending preview was enqueued")
+		return nil, nil
+	}
+	for _, policy := range []string{protocol.MediaRetentionBestEffort, protocol.MediaRetentionRequired} {
+		op := protocol.Operation{MediaRetention: policy, Poll: &protocol.Poll{SuccessValues: []string{"completed"}}}
+		observation, err := projectProfilePollResult(context.Background(), &db.TaskRun{ID: "pending-preview", TaskKind: "image"}, op, protocol.Result{Status: "processing", ResultURLs: []string{"https://cdn.example/preview.png"}})
+		if err != nil || observation.Status != model.VideoStatusProcessing || observation.Outcome != "pending" || observation.PausePolling {
+			t.Fatalf("pending preview changed task lifecycle: observation=%+v err=%v", observation, err)
+		}
+	}
+}
+
 func TestProfilePollBudgetDoesNotCountWithoutProviderRequest(t *testing.T) {
 	if err := db.InitDB(t.TempDir() + "/profile-poll-budget.db"); err != nil {
 		t.Fatal(err)

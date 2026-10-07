@@ -97,6 +97,9 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 	}
 	pollStarted := time.Now()
 	result, op, err := profilePollOnce(pollCtx, run)
+	if err == nil {
+		setChannelMediaResponsePolicy(c, op.EffectiveMediaRetention())
+	}
 	pollFinished := time.Now()
 	if err != nil {
 		commitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -142,9 +145,8 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 		status, outcome, success = model.VideoStatusFailed, "failed", false
 	}
 	providerSucceeded := outcome == "success"
-	mediaExpected := len(result.ResultURLs) > 0 || profileContentMediaEligible(op, run.TaskKind)
-	requiredMedia := providerSucceeded && mediaExpected && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
-	var mediaAssets []db.MediaAsset
+	requiredPolicy := op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
+	requiredMedia := providerSucceeded && requiredPolicy
 	var mediaErr error
 	persistErr := db.WithTaskRunLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, func(txCtx context.Context) error {
 		if len(result.RawBody) > 0 {
@@ -166,9 +168,11 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 		mediaErr = db.WithTaskRunLeaseContext(c.Request.Context(), run.ID, run.LeaseOwner, func(txCtx context.Context) error {
 			var err error
 			if len(result.ResultURLs) > 0 {
-				mediaAssets, err = ensureProfileTaskResultMedia(txCtx, run.ID, run.TaskKind, result.ResultURLs)
+				_, err = ensureProfileTaskResultMedia(txCtx, run.ID, run.TaskKind, result.ResultURLs)
 			} else if profileContentMediaEligible(op, run.TaskKind) {
-				mediaAssets, err = ensureProfileTaskContentMedia(txCtx, run.ID, run.TaskKind)
+				_, err = ensureProfileTaskContentMedia(txCtx, run.ID, run.TaskKind)
+			} else if requiredMedia {
+				err = errors.New("required media result has no source URL or content endpoint")
 			}
 			return err
 		})
@@ -182,10 +186,21 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 			// available. The provider result is already durable above, so later status
 			// reads can retry local materialization without submitting or polling
 			// upstream again.
-			if requiredMedia && (mediaErr != nil || !profileMediaAssetsAvailable(mediaAssets)) {
-				status, outcome = model.VideoStatusProcessing, "pending"
+			mediaReady := false
+			if requiredMedia && mediaErr == nil {
+				var err error
+				mediaReady, err = profileTaskMediaReady(txCtx, run.ID, run.TaskKind)
+				if err != nil {
+					return err
+				}
+			}
+			if requiredMedia && (mediaErr != nil || !mediaReady) {
+				status, outcome = "materializing", "pending"
 				if mediaErr != nil {
 					success = false
+					if err := db.DBForContext(txCtx).WithContext(txCtx).Model(&db.TaskRun{}).Where("id = ?", run.ID).Update("task_error", profileMediaErrorMessage(mediaErr)).Error; err != nil {
+						return err
+					}
 				}
 			}
 			if err := db.RecordTaskPollForLeaseContext(txCtx, run.ID, run.LeaseOwner, success, result.HTTPStatus); err != nil {
@@ -225,9 +240,11 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 			setImageJobResponseIDs(response, cleanLookupID)
 		}
 		managed := attachProfileManagedMedia(c, run, kind, response)
-		if requiredMedia && (!managed || mediaErr != nil) {
+		if requiredPolicy && (!managed || mediaErr != nil) {
 			clearProfileMediaPayload(response)
-			response["status"] = "materializing"
+			if providerSucceeded {
+				response["status"] = "materializing"
+			}
 			if requiredMedia && mediaErr != nil {
 				response["error"] = profileMediaErrorMessage(mediaErr)
 			}
@@ -241,9 +258,11 @@ func profileTaskStatus(c *gin.Context, lookupID, kind string) (any, bool, error)
 		response.TaskID = lookupID
 	}
 	managed := attachProfileManagedMedia(c, run, kind, response)
-	if requiredMedia && (!managed || mediaErr != nil) {
+	if requiredPolicy && (!managed || mediaErr != nil) {
 		clearProfileMediaPayload(response)
-		response.Status = "materializing"
+		if providerSucceeded {
+			response.Status = "materializing"
+		}
 		if requiredMedia && mediaErr != nil {
 			response.Error = profileMediaErrorMessage(mediaErr)
 		}
@@ -265,6 +284,11 @@ func profileRequiredMediaStatus(c *gin.Context, run *db.TaskRun, kind string) (b
 	if !ok || !profileMediaRetentionEnabled(op) {
 		return false, run
 	}
+	urls := profileResultURLs(run.ResultBody, kind)
+	providerSucceeded := profileRunProviderSucceeded(run, op, kind)
+	if !providerSucceeded {
+		return false, run
+	}
 	assets, err := db.ListMediaAssetsForTaskRunContext(c.Request.Context(), run.ID, kind)
 	if err == nil && len(assets) > 0 {
 		allReady := true
@@ -282,13 +306,19 @@ func profileRequiredMediaStatus(c *gin.Context, run *db.TaskRun, kind string) (b
 		}
 		return true, run
 	}
-	urls := profileResultURLs(run.ResultBody, kind)
-	if len(urls) > 0 {
+	if len(urls) > 0 && providerSucceeded {
 		_, _ = ensureProfileTaskResultMedia(c.Request.Context(), run.ID, kind, urls)
 		return true, run
 	}
-	if profileContentMediaEligible(op, kind) && (strings.EqualFold(strings.TrimSpace(run.TaskStatus), model.VideoStatusCompleted) || profileResultIndicatesSuccess(run.ResultBody, op)) {
+	if profileContentMediaEligible(op, kind) && providerSucceeded {
 		_, _ = ensureProfileTaskContentMedia(c.Request.Context(), run.ID, kind)
+		return true, run
+	}
+	if op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && providerSucceeded {
+		run.TaskStatus, run.TaskOutcome = "materializing", "pending"
+		run.TaskError = "required media result has no source URL or content endpoint"
+		_ = db.UpdateTaskRunStatusContext(c.Request.Context(), run.ID, run.TaskStatus, run.TaskOutcome)
+		_ = db.DBForContext(c.Request.Context()).WithContext(c.Request.Context()).Model(&db.TaskRun{}).Where("id = ?", run.ID).Update("task_error", run.TaskError).Error
 		return true, run
 	}
 	return false, run
@@ -391,6 +421,19 @@ func profileResultIndicatesSuccess(resultBody string, op protocol.Operation) boo
 	return containsProfileFold(op.Poll.SuccessValues, status)
 }
 
+func profileRunProviderSucceeded(run *db.TaskRun, op protocol.Operation, kind string) bool {
+	if run == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(run.TaskStatus), model.VideoStatusCompleted) || strings.EqualFold(strings.TrimSpace(run.TaskStatus), "materializing") || profileResultIndicatesSuccess(run.ResultBody, op) {
+		return true
+	}
+	// Older gateway-wait tasks persisted a processing wrapper only after the
+	// provider had completed. New tasks freeze retention explicitly, so their
+	// pending previews never qualify for this compatibility path.
+	return run.MediaRetention == "" && op.PollingMode == protocol.PollingGatewayWait && len(profileResultURLs(run.ResultBody, kind)) > 0
+}
+
 func profileSelectJSON(value any, selector string) any {
 	if value == nil || strings.TrimSpace(selector) == "" {
 		return nil
@@ -485,21 +528,17 @@ func profilePollOnce(ctx context.Context, run *db.TaskRun) (protocol.Result, pro
 	if run == nil {
 		return protocol.Result{}, protocol.Operation{}, errors.New("profile task is nil")
 	}
-	revision, err := db.GetProtocolProfileRevisionContext(ctx, run.ProfileID, run.ProfileRevision)
+	compiled, err := profileContentProfile(ctx, run)
 	if err != nil {
-		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("load profile revision: %w", err)
-	}
-	var source protocol.Profile
-	if err := json.Unmarshal([]byte(revision.ContentJSON), &source); err != nil {
-		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("decode profile revision: %w", err)
-	}
-	compiled, err := protocol.Compile(source)
-	if err != nil {
-		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("compile profile revision: %w", err)
+		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("load profile task snapshot: %w", err)
 	}
 	op, ok := profileOperation(compiled, run.Operation)
 	if !ok || op.Poll == nil {
 		return protocol.Result{}, protocol.Operation{}, fmt.Errorf("profile operation %q has no poll definition", run.Operation)
+	}
+	op, err = taskMediaOperation(ctx, run, op)
+	if err != nil {
+		return protocol.Result{}, protocol.Operation{}, err
 	}
 	channel, err := db.GetChannelModelContext(ctx, run.ChannelID)
 	if err != nil {
@@ -507,7 +546,7 @@ func profilePollOnce(ctx context.Context, run *db.TaskRun) (protocol.Result, pro
 	}
 	upstream := channel.ToUpstreamChannel()
 	result, err := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(nil), upstream.ID).PollOnce(ctx, compiled, run.Operation, protocol.Request{BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID})
-	if err == nil && strings.EqualFold(strings.TrimSpace(run.TaskKind), asyncTaskKindImage) {
+	if err == nil {
 		result.ResultURLs = normalizeProfileImageSources(result.ResultURLs, upstream.BaseURL)
 	}
 	return result, op, err
@@ -518,8 +557,14 @@ func profileDurableStatus(c *gin.Context, run *db.TaskRun, kind string, requeste
 	if len(requestedID) > 0 {
 		reqID = strings.TrimPrefix(strings.TrimSpace(requestedID[0]), imageTaskIDPrefix)
 	}
-	op, _ := profileOperationForRun(c.Request.Context(), run)
-	requiredMedia := op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
+	op, known := profileOperationForRun(c.Request.Context(), run)
+	if known {
+		setChannelMediaResponsePolicy(c, op.EffectiveMediaRetention())
+	}
+	// Missing/corrupt definitions must not silently weaken required retention
+	// and expose signed provider URLs from a historical result.
+	requiredMedia := !known || op.EffectiveMediaRetention() == protocol.MediaRetentionRequired
+	providerSucceeded := !known || profileRunProviderSucceeded(run, op, kind)
 	if kind == asyncTaskKindImage {
 		var payload map[string]any
 		if strings.TrimSpace(run.ResultBody) != "" && json.Unmarshal([]byte(run.ResultBody), &payload) == nil && payload != nil {
@@ -529,9 +574,14 @@ func profileDurableStatus(c *gin.Context, run *db.TaskRun, kind string, requeste
 				setImageJobResponseIDs(payload, reqID)
 			}
 			managed := attachProfileManagedMedia(c, run, kind, payload)
-			if requiredMedia && !managed && (profilePayloadHasMedia(payload) || profileMediaAssetsExist(c, run, kind)) {
+			if requiredMedia && !managed && (profilePayloadHasMedia(payload) || profileMediaAssetsExist(c, run, kind) || strings.EqualFold(run.TaskStatus, "materializing")) {
 				clearProfileMediaPayload(payload)
-				payload["status"] = "materializing"
+				if providerSucceeded {
+					payload["status"] = "materializing"
+				}
+				if run.TaskError != "" {
+					payload["error"] = run.TaskError
+				}
 			}
 			return payload
 		}
@@ -568,9 +618,14 @@ func profileDurableStatus(c *gin.Context, run *db.TaskRun, kind string, requeste
 			}
 		}
 		managed := attachProfileManagedMedia(c, run, kind, &payload)
-		if requiredMedia && !managed && (profilePayloadHasMedia(&payload) || profileMediaAssetsExist(c, run, kind)) {
+		if requiredMedia && !managed && (profilePayloadHasMedia(&payload) || profileMediaAssetsExist(c, run, kind) || strings.EqualFold(run.TaskStatus, "materializing")) {
 			clearProfileMediaPayload(&payload)
-			payload.Status = "materializing"
+			if providerSucceeded {
+				payload.Status = "materializing"
+			}
+			if run.TaskError != "" {
+				payload.Error = run.TaskError
+			}
 		}
 		return &payload
 	}
@@ -618,7 +673,8 @@ func attachProfileManagedMedia(c *gin.Context, run *db.TaskRun, kind string, pay
 	if len(managed) == 0 {
 		return false
 	}
-	if op, ok := profileOperationForRun(c.Request.Context(), run); ok && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && len(managed) != len(assets) {
+	op, known := profileOperationForRun(c.Request.Context(), run)
+	if (!known || op.EffectiveMediaRetention() == protocol.MediaRetentionRequired) && len(managed) != len(assets) {
 		return false
 	}
 	if video, ok := payload.(*model.VideoTaskResponse); ok {
@@ -637,22 +693,19 @@ func attachProfileManagedMedia(c *gin.Context, run *db.TaskRun, kind string, pay
 }
 
 func profileOperationForRun(ctx context.Context, run *db.TaskRun) (protocol.Operation, bool) {
-	if run == nil || strings.TrimSpace(run.ProfileID) == "" || run.ProfileRevision <= 0 {
+	if run == nil {
 		return protocol.Operation{}, false
 	}
-	revision, err := db.GetProtocolProfileRevisionContext(ctx, run.ProfileID, run.ProfileRevision)
+	compiled, err := profileContentProfile(ctx, run)
 	if err != nil {
 		return protocol.Operation{}, false
 	}
-	var source protocol.Profile
-	if err := json.Unmarshal([]byte(revision.ContentJSON), &source); err != nil {
+	op, ok := profileOperation(compiled, run.Operation)
+	if !ok {
 		return protocol.Operation{}, false
 	}
-	compiled, err := protocol.Compile(source)
-	if err != nil {
-		return protocol.Operation{}, false
-	}
-	return profileOperation(compiled, run.Operation)
+	op, err = taskMediaOperation(ctx, run, op)
+	return op, err == nil
 }
 
 func profilePayloadHasMedia(payload any) bool {

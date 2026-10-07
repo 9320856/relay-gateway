@@ -178,7 +178,7 @@ func auditChannelType(database *gorm.DB, channelType string) (ChannelMigrationSu
 	if err := count(profileTaskRunsForChannel(database, channelType).Where("async_task_runs.task_status NOT IN ?", terminalStatuses), &item.NonTerminalProfileTaskRuns); err != nil {
 		return item, err
 	}
-	if err := count(profileTaskRunsForChannel(database, channelType).Where("TRIM(COALESCE(async_task_runs.profile_id, '')) = '' OR async_task_runs.profile_revision <= 0 OR NOT EXISTS (SELECT 1 FROM protocol_profile_revisions r WHERE r.profile_id = async_task_runs.profile_id AND r.revision = async_task_runs.profile_revision AND r.state = ?)", db.ProfileRevisionPublished), &item.ProfileTasksMissingRevision); err != nil {
+	if err := countProfileTasksMissingRevision(database, channelType, &item.ProfileTasksMissingRevision); err != nil {
 		return item, err
 	}
 	if err := count(profileTaskRunsForChannel(database, channelType).Where("TRIM(COALESCE(async_task_runs.profile_digest, '')) = ''"), &item.ProfileTasksMissingDigest); err != nil {
@@ -230,6 +230,43 @@ func auditChannelType(database *gorm.DB, channelType string) (ChannelMigrationSu
 		return item, err
 	}
 	return item, nil
+}
+
+// Historical tasks can retain their immutable definition in the digest archive
+// after catalog deletion, and retired revisions remain valid for captured work.
+// Use the execution lookup's validation so a corrupt archive/catalog reference
+// does not satisfy the migration gate merely because its database row exists.
+func countProfileTasksMissingRevision(database *gorm.DB, channelType string, destination *int64) error {
+	if database == nil || destination == nil {
+		return errors.New("database and destination are required")
+	}
+	var references []struct {
+		Engine          string
+		ProfileID       string
+		ProfileRevision int
+		ProfileDigest   string
+		TaskCount       int64
+	}
+	// Group first so repeated tasks using the same captured revision incur one
+	// lookup and content validation, rather than one query per historical task.
+	if err := profileTaskRunsForChannel(database, channelType).
+		Select("async_task_runs.engine, async_task_runs.profile_id, async_task_runs.profile_revision, async_task_runs.profile_digest, COUNT(*) AS task_count").
+		Group("async_task_runs.engine, async_task_runs.profile_id, async_task_runs.profile_revision, async_task_runs.profile_digest").Find(&references).Error; err != nil {
+		return err
+	}
+	ctx := db.WithTx(database.Statement.Context, database)
+	var missing int64
+	for _, reference := range references {
+		run := &db.TaskRun{Engine: reference.Engine, ProfileID: reference.ProfileID, ProfileRevision: reference.ProfileRevision, ProfileDigest: reference.ProfileDigest}
+		if _, err := db.GetTaskProfileRevisionContext(ctx, run); err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) && !errors.Is(err, db.ErrProfileSnapshotInvalid) {
+				return err
+			}
+			missing += reference.TaskCount
+		}
+	}
+	*destination = missing
+	return nil
 }
 
 // countMissingProfileOperations checks operation coverage per enabled channel,

@@ -362,17 +362,11 @@ func (a *OpenAIAdapter) forwardVideoContent(
 	extraHeaders map[string]string,
 	w http.ResponseWriter,
 ) error {
-	return a.ExecuteWithKeyRotation(ctx, channel, func(key string) (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		a.SetHeadersWithKey(httpReq, channel, key)
-		for k, v := range extraHeaders {
-			httpReq.Header.Set(k, v)
-		}
-		return httpReq, nil
-	}, func(resp *http.Response, _ string) error {
+	resp, err := a.openVideoContentURL(ctx, channel, method, targetURL, extraHeaders)
+	if err != nil {
+		return err
+	}
+	return func() error {
 		defer resp.Body.Close()
 
 		if isVideoContentRedirect(resp.StatusCode) {
@@ -422,7 +416,7 @@ func (a *OpenAIAdapter) forwardVideoContent(
 			return &ErrStreamAborted{Err: err}
 		}
 		return nil
-	})
+	}()
 }
 
 var safeVideoContentTypes = map[string]struct{}{

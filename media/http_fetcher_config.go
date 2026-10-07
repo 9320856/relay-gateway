@@ -2,25 +2,27 @@ package media
 
 import (
 	"net"
+	"net/url"
 	"os"
 	"strings"
-
-	"golang.org/x/net/publicsuffix"
 )
 
-// NewHTTPSourceFetcher permits Fake-IP only for this source's hostname when it
-// shares the provider's registrable domain or is explicitly configured by the
-// deployer. The environment list accepts exact public domain names, not URLs,
-// IP literals, wildcards, or suffix patterns. All other fetch policies remain
-// the strict defaults.
+// NewHTTPSourceFetcher handles media returned by an upstream and its CDN
+// redirects without requiring a provider/CDN domain list. A nonempty valid
+// HTTP(S) baseURL identifies upstream response media; callers must pass that
+// origin rather than a client-supplied hint. Downloads without this origin use
+// the exact environment host list. Neither mode admits actual private IPs.
 func NewHTTPSourceFetcher(sourceURL, baseURL string) HTTPSourceFetcher {
 	fetcher := HTTPSourceFetcher{}
-	if host, ok := TrustedFakeIPHost(sourceURL, baseURL); ok {
-		fetcher.TrustedFakeIPHosts = map[string]struct{}{host: {}}
-		return fetcher
-	}
 	sourceHost, ok := registrableHTTPHost(sourceURL)
 	if !ok {
+		return fetcher
+	}
+	if _, ok := configuredPublicMediaHost(sourceHost); !ok {
+		return fetcher
+	}
+	if upstream, err := url.Parse(strings.TrimSpace(baseURL)); err == nil && upstream.Hostname() != "" && upstream.User == nil && (upstream.Scheme == "http" || upstream.Scheme == "https") {
+		fetcher.AllowUpstreamFakeIP = true
 		return fetcher
 	}
 	for _, entry := range strings.Split(os.Getenv("RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS"), ",") {
@@ -35,7 +37,7 @@ func NewHTTPSourceFetcher(sourceURL, baseURL string) HTTPSourceFetcher {
 
 func configuredPublicMediaHost(entry string) (string, bool) {
 	host, err := normalizeMediaHostname(entry)
-	if err != nil || net.ParseIP(host) != nil || len(host) > 253 {
+	if err != nil || net.ParseIP(host) != nil || len(host) > 253 || !strings.Contains(host, ".") {
 		return "", false
 	}
 	for _, suffix := range []string{".invalid", ".example", ".test", ".localhost", ".local", ".internal", ".home.arpa"} {
@@ -54,9 +56,7 @@ func configuredPublicMediaHost(entry string) (string, bool) {
 			}
 		}
 	}
-	_, icann := publicsuffix.PublicSuffix(host)
-	if _, err := publicsuffix.EffectiveTLDPlusOne(host); err != nil || !icann {
-		return "", false
-	}
+	// A public-suffix classification describes domain registration boundaries,
+	// not network reachability. Address validation decides where we may dial.
 	return host, true
 }

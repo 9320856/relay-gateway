@@ -26,6 +26,7 @@ import (
 	"relay-gateway/audit"
 	"relay-gateway/config"
 	"relay-gateway/db"
+	relaymedia "relay-gateway/media"
 	"relay-gateway/model"
 	"relay-gateway/profilebootstrap"
 	"relay-gateway/protocol"
@@ -414,12 +415,28 @@ func handleSaveChannel(c *gin.Context) {
 	var input struct {
 		db.ChannelModel
 		SelectedModels json.RawMessage `json:"selected_models"`
+		MediaRetention json.RawMessage `json:"media_retention"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		requestError(c, err, "渠道配置格式不正确")
 		return
 	}
 	cm := input.ChannelModel
+	if len(input.MediaRetention) > 0 {
+		var selectedPolicy string
+		if strings.TrimSpace(string(input.MediaRetention)) == "null" || json.Unmarshal(input.MediaRetention, &selectedPolicy) != nil {
+			requestError(c, errors.New("media_retention must be a string"), "媒体保留策略必须为字符串")
+			return
+		}
+		policy, err := relaymedia.NormalizeRetention(selectedPolicy)
+		if err != nil {
+			requestError(c, err, "媒体保留策略不正确")
+			return
+		}
+		cm.MediaRetention = policy
+	} else {
+		cm.MediaRetention = relaymedia.RetentionDisabled
+	}
 	if len(input.SelectedModels) > 0 {
 		if _, err := db.ParseSelectedModels(string(input.SelectedModels)); err != nil {
 			requestError(c, err, "已选模型必须是具体模型名称组成的数组")
@@ -476,6 +493,9 @@ func handleSaveChannel(c *gin.Context) {
 			return
 		}
 		previousType = existing.Type
+		if len(input.MediaRetention) == 0 {
+			cm.MediaRetention = existing.MediaRetention
+		}
 	}
 	if (newChannel || !strings.EqualFold(strings.TrimSpace(previousType), cm.Type)) && !isChannelTypePublished(c.Request.Context(), cm.Type) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("渠道协议 %q 已停用，请先发布对应的 Profile", cm.Type)})
@@ -1706,79 +1726,41 @@ func findActiveChannelByID(channelID string) *config.UpstreamChannel {
 	return nil
 }
 
-// extractModelFast 快速从 JSON 字节切片中提取顶层 "model" 字段值，避免为大请求体做完整的 json.Unmarshal
-// 具备深度感知 (depth == 1) 与字符串状态机，杜绝用户提示词中包含 "model": "..." 时的碰撞劫持 (BUG-01)
-func extractModelFast(body []byte) string {
-	inString := false
-	escaped := false
-	depth := 0
-	n := len(body)
+// requestModelField rejects ambiguous routing metadata, including escaped and
+// case-insensitive spellings recognized by encoding/json. Other request fields
+// are skipped by the decoder rather than allocated into a map.
+type requestModelField struct {
+	value string
+	seen  bool
+}
 
-	for i := 0; i < n; i++ {
-		c := body[i]
-		if inString {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				inString = false
-			}
-			continue
-		}
-
-		switch c {
-		case '"':
-			inString = true
-			// 仅在处于顶层对象深度 (depth == 1) 时匹配 "model"
-			if depth == 1 && i+7 <= n && string(body[i:i+7]) == `"model"` {
-				pos := i + 7
-				// 跳过冒号前的空白字符
-				for pos < n && (body[pos] == ' ' || body[pos] == '\t' || body[pos] == '\r' || body[pos] == '\n') {
-					pos++
-				}
-				if pos < n && body[pos] == ':' {
-					pos++
-					// 跳过冒号后的空白字符
-					for pos < n && (body[pos] == ' ' || body[pos] == '\t' || body[pos] == '\r' || body[pos] == '\n') {
-						pos++
-					}
-					if pos < n && body[pos] == '"' {
-						pos++ // 跳过开始引号
-						start := pos
-						valEscaped := false
-						for pos < n {
-							if body[pos] == '\\' {
-								valEscaped = true
-								if pos+1 < n {
-									pos += 2
-								} else {
-									break
-								}
-								continue
-							}
-							if body[pos] == '"' {
-								val := string(body[start:pos])
-								if valEscaped {
-									var s string
-									if err := json.Unmarshal(body[start-1:pos+1], &s); err == nil {
-										return strings.TrimSpace(s)
-									}
-								}
-								return strings.TrimSpace(val)
-							}
-							pos++
-						}
-					}
-				}
-			}
-		case '{':
-			depth++
-		case '}':
-			depth--
-		}
+func (m *requestModelField) UnmarshalJSON(raw []byte) error {
+	if m.seen {
+		return errors.New("duplicate model field")
 	}
-	return ""
+	m.seen = true
+	if err := json.Unmarshal(raw, &m.value); err != nil {
+		return fmt.Errorf("model must be a string: %w", err)
+	}
+	m.value = strings.TrimSpace(m.value)
+	return nil
+}
+
+func parseRequestModel(body []byte) (string, error) {
+	var meta struct {
+		Model requestModelField `json:"model"`
+	}
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return "", fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return meta.Model.value, nil
+}
+
+// extractModelFast shares request validation with routing while decoding only
+// model metadata. Audit callers treat malformed or ambiguous bodies as empty.
+func extractModelFast(body []byte) string {
+	modelName, _ := parseRequestModel(body)
+	return modelName
 }
 
 // isStreamRequested 判断请求体中是否开启了 stream（使用 json.Unmarshal 精确解析，杜绝用户消息内容碰撞劫持）
@@ -1801,22 +1783,12 @@ func readBodyAndModel(c *gin.Context) ([]byte, string, error) {
 	// cannot consume malformed input that the legacy handler still needs to
 	// classify as a client-side 400 error.
 	c.Request.Body = io.NopCloser(bytes.NewReader(rawBytes))
-	if !json.Valid(rawBytes) {
-		return nil, "", errors.New("invalid JSON body")
+	modelName, err := parseRequestModel(rawBytes)
+	if err != nil {
+		return nil, "", err
 	}
-
-	modelName := extractModelFast(rawBytes)
 	if entry := audit.FromContext(c.Request.Context()); entry != nil {
 		entry.SetReqBody(rawBytes, modelName)
-	}
-	if modelName == "" {
-		var meta struct {
-			Model string `json:"model"`
-		}
-		if err := json.Unmarshal(rawBytes, &meta); err != nil {
-			return nil, "", fmt.Errorf("invalid JSON body: %w", err)
-		}
-		modelName = strings.TrimSpace(meta.Model)
 	}
 
 	return rawBytes, modelName, nil
@@ -2090,6 +2062,11 @@ func handlePlayground(c *gin.Context, legacy bool) {
 			return
 		}
 
+		if err := retainLegacySynchronousMedia(c, successChannel, "image", imgResp); err != nil {
+			sendPlaygroundError(c, err, "图片保存失败", latency, successChannel.ID)
+			return
+		}
+
 		var imageURLs []string
 		if imgResp != nil {
 			for _, item := range imgResp.Data {
@@ -2240,6 +2217,7 @@ func handlePlayground(c *gin.Context, legacy bool) {
 			return
 		}
 
+		freezeLegacyChannelPolicy(c, successChannel)
 		taskAlias, taskIDs := collectVideoTaskIDs(vidResp)
 		if taskAlias != "" && successChannel != nil {
 			if gtID, disambiguated := disambiguateAsyncTaskIDs(successChannel.ID, asyncTaskKindVideo, taskAlias, taskIDs); disambiguated {
@@ -2260,6 +2238,10 @@ func handlePlayground(c *gin.Context, legacy bool) {
 		}
 		if taskAlias == "" {
 			taskAlias = strings.TrimSpace(vidResp.TaskID)
+		}
+		if err := retainLegacyTaskMedia(c, successChannel, taskAlias, "video", vidResp.Status, vidResp); err != nil {
+			sendPlaygroundError(c, err, "视频保存失败", latency, chanID)
+			return
 		}
 		taskStatus := model.NormalizeVideoStatus(vidResp.Status)
 		if taskStatus == "failed" || taskAlias == "" {
@@ -2433,6 +2415,10 @@ func handlePlaygroundImageStatus(c *gin.Context) {
 		}
 	}
 
+	if serveStoredLegacyMediaStatus(c, lookupID, "image", true) {
+		return
+	}
+
 	var targetChannel *config.UpstreamChannel
 	var err error
 	if mapping := db.GetTaskMappingForKindContext(c.Request.Context(), lookupID, asyncTaskKindImage); mapping != nil {
@@ -2483,6 +2469,11 @@ func handlePlaygroundImageStatus(c *gin.Context) {
 		c.Header("X-Relay-Task-Mapping", "missing")
 	}
 	taskStatus := playgroundImageTaskStatus(resp, "")
+	if err := retainLegacyTaskMedia(c, targetChannel, lookupID, "image", taskStatus, resp); err != nil {
+		sendPlaygroundError(c, err, "图片保存失败", 0, targetChannel.ID)
+		return
+	}
+	taskStatus = playgroundImageTaskStatus(resp, "")
 	result := gin.H{
 		"status":      "ok",
 		"task_id":     taskID,
@@ -2551,6 +2542,10 @@ func handlePlaygroundVideoStatus(c *gin.Context) {
 	// or deleted channels are intentionally rejected rather than falling back to
 	// another credential set; only a completely missing mapping may use the
 	// explicit playground channel while local recovery catches up.
+	if serveStoredLegacyMediaStatus(c, taskID, "video", true) {
+		return
+	}
+
 	var targetChannel *config.UpstreamChannel
 	var err error
 	if mapping := db.GetTaskMappingForKindContext(c.Request.Context(), taskID, asyncTaskKindVideo); mapping != nil {
@@ -2599,6 +2594,10 @@ func handlePlaygroundVideoStatus(c *gin.Context) {
 		return
 	}
 
+	if err := retainLegacyTaskMedia(c, targetChannel, taskID, "video", resp.Status, resp); err != nil {
+		sendPlaygroundError(c, err, "视频保存失败", 0, targetChannel.ID)
+		return
+	}
 	taskStatus := model.NormalizeVideoStatus(resp.Status)
 	videoURL := playgroundVideoResultURL(c, resp, canExposeContent)
 
@@ -2869,12 +2868,16 @@ func handleImagesGenerations(c *gin.Context) {
 	}
 
 	var resp *model.ImageResponse
+	var successChannel *config.UpstreamChannel
 	err = service.DefaultDispatcher.ExecuteWithPolicy(c.Request.Context(), req.Model, "images", service.RetryCreateTask, func() bool {
 		return resp == nil
 	}, func(ch *config.UpstreamChannel, adp adapter.Adapter) error {
 		reqCopy := req
 		var rErr error
 		resp, rErr = adp.ImagesGenerations(c.Request.Context(), ch, &reqCopy)
+		if rErr == nil {
+			successChannel = ch
+		}
 		return rErr
 	})
 
@@ -2882,10 +2885,16 @@ func handleImagesGenerations(c *gin.Context) {
 		writeUpstreamError(c, err, "上游请求失败")
 		return
 	}
+	if err := retainLegacySynchronousMedia(c, successChannel, "image", resp); err != nil {
+		writeUpstreamError(c, err, "图片保存失败")
+		return
+	}
 	c.JSON(http.StatusOK, resp)
 }
 
 func handleImagesEdits(c *gin.Context) {
+	var captured *boundedMediaResponseWriter
+	var successChannel *config.UpstreamChannel
 	contentType := c.Request.Header.Get("Content-Type")
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<20)
@@ -2935,7 +2944,7 @@ func handleImagesEdits(c *gin.Context) {
 		}
 
 		err = service.DefaultDispatcher.ExecuteWithPolicy(c.Request.Context(), modelName, "images", service.RetryCreateTask, func() bool {
-			return !c.Writer.Written()
+			return !c.Writer.Written() && (captured == nil || captured.Status < 200 || captured.Status >= 300)
 		}, func(ch *config.UpstreamChannel, adp adapter.Adapter) error {
 			targetModel := modelName
 			if mapped, ok := ch.ModelMap[modelName]; ok && mapped != "" {
@@ -3006,9 +3015,20 @@ func handleImagesEdits(c *gin.Context) {
 			}
 
 			log.Printf("[IMAGE_EDIT] Dispatching multipart edit to upstream [%s]: model=%s, size=%s", ch.ID, targetModel, normalizedSize)
-			return adp.ImagesEdits(c.Request.Context(), ch, bodyBuf.Bytes(), mw.FormDataContentType(), c.Writer)
+			if ch.MediaRetention == "" || ch.MediaRetention == relaymedia.RetentionDisabled {
+				return adp.ImagesEdits(c.Request.Context(), ch, bodyBuf.Bytes(), mw.FormDataContentType(), c.Writer)
+			}
+			captured = newBoundedMediaResponseWriter(64 << 20)
+			if ch.MediaRetention == relaymedia.RetentionBestEffort {
+				captured.fallback = c.Writer
+			}
+			successChannel = ch
+			return adp.ImagesEdits(c.Request.Context(), ch, bodyBuf.Bytes(), mw.FormDataContentType(), captured)
 		})
 
+		if err == nil && captured != nil {
+			err = finishLegacyCapturedMedia(c, captured, successChannel, "image")
+		}
 		if err != nil && !c.Writer.Written() {
 			writeUpstreamError(c, err, "上游请求失败")
 		}
@@ -3041,7 +3061,7 @@ func handleImagesEdits(c *gin.Context) {
 	}
 
 	err = service.DefaultDispatcher.ExecuteWithPolicy(c.Request.Context(), modelName, "images", service.RetryCreateTask, func() bool {
-		return !c.Writer.Written()
+		return !c.Writer.Written() && (captured == nil || captured.Status < 200 || captured.Status >= 300)
 	}, func(ch *config.UpstreamChannel, adp adapter.Adapter) error {
 		reqCopy := req
 		if mapped, ok := ch.ModelMap[reqCopy.Model]; ok && mapped != "" {
@@ -3053,9 +3073,20 @@ func handleImagesEdits(c *gin.Context) {
 			return mErr
 		}
 		log.Printf("[IMAGE_EDIT] Dispatching JSON edit to upstream [%s]: model=%s, size=%v", ch.ID, reqCopy.Model, normPayload["size"])
-		return adp.ImagesEdits(c.Request.Context(), ch, bodyBytes, "application/json", c.Writer)
+		if ch.MediaRetention == "" || ch.MediaRetention == relaymedia.RetentionDisabled {
+			return adp.ImagesEdits(c.Request.Context(), ch, bodyBytes, "application/json", c.Writer)
+		}
+		captured = newBoundedMediaResponseWriter(64 << 20)
+		if ch.MediaRetention == relaymedia.RetentionBestEffort {
+			captured.fallback = c.Writer
+		}
+		successChannel = ch
+		return adp.ImagesEdits(c.Request.Context(), ch, bodyBytes, "application/json", captured)
 	})
 
+	if err == nil && captured != nil {
+		err = finishLegacyCapturedMedia(c, captured, successChannel, "image")
+	}
 	if err != nil && !c.Writer.Written() {
 		writeUpstreamError(c, err, "上游请求失败")
 	}
@@ -3507,6 +3538,7 @@ func handleCreateVideo(c *gin.Context) {
 
 	if resp != nil {
 		if successChannel != nil {
+			freezeLegacyChannelPolicy(c, successChannel)
 			taskAlias, taskIDs := collectVideoTaskIDs(resp)
 			if gtID, disambiguated := disambiguateAsyncTaskIDs(successChannel.ID, asyncTaskKindVideo, taskAlias, taskIDs); disambiguated {
 				canonicalProviderID := taskAlias
@@ -3521,6 +3553,10 @@ func handleCreateVideo(c *gin.Context) {
 				_ = registerAsyncTaskMappings(c, successChannel.ID, asyncTaskKindVideo, canonicalProviderID, resp.Status, gtID)
 			} else {
 				_ = registerAsyncTaskMappings(c, successChannel.ID, asyncTaskKindVideo, taskAlias, resp.Status, taskIDs...)
+			}
+			if err := retainLegacyTaskMedia(c, successChannel, videoContentTaskID(resp), "video", resp.Status, resp); err != nil {
+				writeUpstreamError(c, err, "视频保存失败")
+				return
 			}
 			if canExposeGatewayStableVideoContent(resp, successChannel.ID) {
 				formatVideoTaskResponse(c, resp)
@@ -3554,6 +3590,10 @@ func handleGetVideo(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, profileResp)
+		return
+	}
+
+	if serveStoredLegacyMediaStatus(c, taskID, "video", false) {
 		return
 	}
 
@@ -3594,6 +3634,10 @@ func handleGetVideo(c *gin.Context) {
 		}
 		if db.GetTaskChannelForKind(resp.TaskID, asyncTaskKindVideo) != targetChannel.ID {
 			resp.TaskID = taskID
+		}
+		if err := retainLegacyTaskMedia(c, targetChannel, taskID, "video", resp.Status, resp); err != nil {
+			writeUpstreamError(c, err, "视频保存失败")
+			return
 		}
 		if canExposeContent {
 			formatVideoTaskResponse(c, resp)
@@ -3674,6 +3718,19 @@ func reconcileVideoStatusAliases(c *gin.Context, channelID, lookupTaskID string,
 func playgroundVideoResultURL(c *gin.Context, resp *model.VideoTaskResponse, canExposeContent bool) string {
 	if resp == nil || model.NormalizeVideoStatus(resp.Status) != model.VideoStatusCompleted {
 		return ""
+	}
+	if isManagedMediaURL(resp.VideoURL) {
+		return resp.VideoURL
+	}
+	if isManagedMediaURL(resp.URL) {
+		return resp.URL
+	}
+	if preserveOriginalMediaResponse(c) {
+		for _, candidate := range []string{resp.VideoURL, resp.URL} {
+			if candidate != "" && !isGatewayStableVideoContentURL(c, candidate) {
+				return candidate
+			}
+		}
 	}
 	if canExposeContent {
 		if contentTaskID := videoContentTaskID(resp); contentTaskID != "" {
@@ -3783,11 +3840,21 @@ func formatVideoTaskResponse(c *gin.Context, resp *model.VideoTaskResponse) {
 	if resp == nil {
 		return
 	}
+	if isManagedMediaURL(resp.VideoURL) || isManagedMediaURL(resp.URL) {
+		return
+	}
 	if resp.ID == "" && resp.TaskID != "" {
 		resp.ID = resp.TaskID
 	}
 	if resp.TaskID == "" && resp.ID != "" {
 		resp.TaskID = resp.ID
+	}
+	if preserveOriginalMediaResponse(c) {
+		for _, candidate := range []string{resp.VideoURL, resp.URL} {
+			if candidate != "" && !isGatewayStableVideoContentURL(c, candidate) {
+				return
+			}
+		}
 	}
 
 	// A provider may expose an API-facing request ID as id and the actual media
@@ -3865,6 +3932,13 @@ func handleGetVideoContent(c *gin.Context) {
 	if handled, profileErr := profileTaskContent(c, taskID); handled {
 		if profileErr != nil && !c.Writer.Written() {
 			writeUpstreamError(c, profileErr, "Profile 视频内容获取失败")
+		}
+		return
+	}
+
+	if handled, err := legacyManagedVideoContent(c, taskID); handled {
+		if err != nil && !c.Writer.Written() {
+			writeUpstreamError(c, err, "视频保存失败")
 		}
 		return
 	}
@@ -3951,6 +4025,7 @@ func handleCreateImageJob(c *gin.Context) {
 	}
 
 	if successChannel != nil {
+		freezeLegacyChannelPolicy(c, successChannel)
 		if taskAlias, status, taskIDs := collectImageJobTaskDetails(resp); taskAlias != "" {
 			if gtID, disambiguated := disambiguateAsyncTaskIDs(successChannel.ID, asyncTaskKindImage, taskAlias, taskIDs); disambiguated {
 				canonicalProviderID := taskAlias
@@ -3962,6 +4037,13 @@ func handleCreateImageJob(c *gin.Context) {
 		}
 	}
 
+	if successChannel != nil {
+		alias, status, _ := collectImageJobTaskDetails(resp)
+		if err := retainLegacyTaskMedia(c, successChannel, imageTaskIDPrefix+alias, "image", status, resp); err != nil {
+			writeUpstreamError(c, err, "图片保存失败")
+			return
+		}
+	}
 	c.JSON(http.StatusAccepted, resp)
 }
 
@@ -3977,6 +4059,10 @@ func handleGetImageJob(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusOK, profileResp)
+		return
+	}
+
+	if serveStoredLegacyMediaStatus(c, imageTaskIDPrefix+taskID, "image", false) {
 		return
 	}
 
@@ -4019,6 +4105,11 @@ func handleGetImageJob(c *gin.Context) {
 		}
 	}
 	_, status := imageJobDetails(resp)
+	if err := retainLegacyTaskMedia(c, targetChannel, imageTaskIDPrefix+taskID, "image", status, resp); err != nil {
+		writeUpstreamError(c, err, "图片保存失败")
+		return
+	}
+	_, status = imageJobDetails(resp)
 	markMappedAsyncTaskPoll(c, imageTaskIDPrefix+taskID, asyncTaskKindImage, status, resp)
 	c.JSON(http.StatusOK, resp)
 }

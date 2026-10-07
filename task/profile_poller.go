@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -36,25 +35,19 @@ var ensureTaskResultMedia = db.EnsureTaskResultMediaContext
 var ensureTaskContentMedia = db.EnsureTaskContentMediaContext
 
 func ProfilePoll(ctx context.Context, run *db.TaskRun) (Observation, error) {
-	if run == nil || strings.TrimSpace(run.ProfileID) == "" || run.ProfileRevision <= 0 {
-		return Observation{}, errors.New("profile task snapshot is incomplete")
-	}
-	revision, err := db.GetProtocolProfileRevisionContext(ctx, run.ProfileID, run.ProfileRevision)
+	compiled, err := db.LoadTaskProfileContext(ctx, run)
 	if err != nil {
-		return Observation{}, fmt.Errorf("load profile revision: %w", err)
-	}
-	var source protocol.Profile
-	if err := json.Unmarshal([]byte(revision.ContentJSON), &source); err != nil {
-		return Observation{}, fmt.Errorf("decode profile revision: %w", err)
-	}
-	compiled, err := protocol.Compile(source)
-	if err != nil {
-		return Observation{}, fmt.Errorf("compile profile revision: %w", err)
+		return Observation{}, fmt.Errorf("load profile task snapshot: %w", err)
 	}
 	op, ok := profileOperation(compiled, run.Operation)
 	if !ok || op.Poll == nil {
 		return Observation{}, fmt.Errorf("profile operation %q has no poll definition", run.Operation)
 	}
+	retention, err := db.TaskMediaRetention(ctx, run)
+	if err != nil {
+		return Observation{}, fmt.Errorf("load task media retention: %w", err)
+	}
+	op.MediaRetention = retention
 	if observation, exceeded := profilePollBudget(run, op); exceeded {
 		return observation, nil
 	}
@@ -79,9 +72,7 @@ func ProfilePoll(ctx context.Context, run *db.TaskRun) (Observation, error) {
 		observation.NextPollAt = time.Now().Add(op.Poll.NextDelay(run.PollCount+1, result.Headers.Get("Retry-After"), nil))
 		return observation, err
 	}
-	if strings.EqualFold(strings.TrimSpace(run.TaskKind), "image") {
-		result.ResultURLs = media.NormalizeMediaSources(result.ResultURLs, upstream.BaseURL)
-	}
+	result.ResultURLs = media.NormalizeMediaSources(result.ResultURLs, upstream.BaseURL)
 	apply := func(write func(context.Context) error) error {
 		if strings.TrimSpace(run.LeaseOwner) != "" {
 			return db.WithTaskRunLeaseContext(ctx, run.ID, run.LeaseOwner, write)
@@ -136,7 +127,7 @@ func projectProfilePollResult(ctx context.Context, run *db.TaskRun, op protocol.
 		// Required retention is part of the task contract. If the durable
 		// enqueue fails, keep the task non-terminal so the poller can retry
 		// without ever submitting a second provider task.
-		if os.Getenv("RELAY_PROFILE_MEDIA_DISABLED") != "1" && op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled {
+		if op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled {
 			var mediaErr error
 			var mediaAssets []db.MediaAsset
 			if len(result.ResultURLs) > 0 {
@@ -146,6 +137,11 @@ func projectProfilePollResult(ctx context.Context, run *db.TaskRun, op protocol.
 				// the result in processing until the media worker has fetched the
 				// authenticated Content response into the local store.
 				mediaAssets, mediaErr = ensureTaskContentMedia(ctx, run.ID, run.TaskKind)
+			} else if op.EffectiveMediaRetention() == protocol.MediaRetentionRequired {
+				mediaErr = errors.New("required media result has no source URL or content endpoint")
+			}
+			if mediaErr == nil && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && len(mediaAssets) == 0 {
+				mediaErr = errors.New("required media result did not create any media assets")
 			}
 			if mediaErr != nil && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired {
 				observation.Status = model.VideoStatusProcessing
@@ -159,6 +155,16 @@ func projectProfilePollResult(ctx context.Context, run *db.TaskRun, op protocol.
 				return observation, mediaErr
 			}
 			if mediaErr == nil && op.EffectiveMediaRetention() == protocol.MediaRetentionRequired && len(mediaAssets) > 0 {
+				allAvailable := true
+				for _, asset := range mediaAssets {
+					if asset.Status != db.MediaAssetAvailable || strings.TrimSpace(asset.ObjectID) == "" {
+						allAvailable = false
+						break
+					}
+				}
+				if allAvailable {
+					return observation, nil
+				}
 				// The provider is already terminal. Move to a distinct local-media
 				// state so the background poller does not query the provider again
 				// while the materializer owns the remaining work.

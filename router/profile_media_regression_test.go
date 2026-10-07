@@ -130,7 +130,7 @@ func TestProfileRequiredMediaIdempotentReplay(t *testing.T) {
 					})
 				}
 				t.Cleanup(func() { profileMediaFetcherFactory = previousFetcher })
-				channel := &db.ChannelModel{ID: "media-replay-channel", Name: "media replay", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "media-model"}
+				channel := &db.ChannelModel{ID: "media-replay-channel", Name: "media replay", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "media-model", MediaRetention: protocol.MediaRetentionRequired}
 				if err := db.SaveChannelModel(channel); err != nil {
 					t.Fatal(err)
 				}

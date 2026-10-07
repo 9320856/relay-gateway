@@ -327,8 +327,8 @@ func TestGetVideoKeepsUpstreamSuccessWhenAliasPersistenceIsDeferred(t *testing.T
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Status != "completed" || !strings.Contains(payload.VideoURL, "/v1/videos/"+providerTaskID+"/content") || strings.Contains(payload.VideoURL, "cdn.example") {
-		t.Fatalf("successful status response did not retain a stable video URL: %+v", payload)
+	if payload.Status != "completed" || payload.VideoURL != "https://cdn.example/video.mp4?signature=temporary" {
+		t.Fatalf("disabled retention changed the successful provider media URL: %+v", payload)
 	}
 
 	if cached := db.GetTaskMapping(providerTaskID); cached == nil || cached.ChannelID != channel.ID || cached.OriginRequestID != originRequestID || cached.TaskAlias != publicTaskID || cached.TaskKind != asyncTaskKindVideo {
@@ -582,8 +582,8 @@ func TestGetVideoCrossChannelAliasConflictKeepsSuccessWithoutGatewayContentURL(t
 		t.Fatal(err)
 	}
 	expectedStableURL := "http://gateway.example.test/v1/videos/" + publicTaskID + "/content"
-	if payload.ID != publicTaskID || payload.TaskID != publicTaskID || payload.VideoURL != expectedStableURL || payload.URL != expectedStableURL {
-		t.Fatalf("upstream status result was not safely sanitized and stabilized: %+v", payload)
+	if payload.ID != publicTaskID || payload.TaskID != publicTaskID || payload.VideoURL != upstreamVideoURL || payload.URL != upstreamVideoURL {
+		t.Fatalf("upstream status result lost its pinned identity or original media: %+v", payload)
 	}
 	for _, candidate := range append([]string{payload.VideoURL, payload.URL}, dataURLs(payload.Data)...) {
 		if strings.Contains(candidate, sharedProviderID) {
@@ -592,8 +592,8 @@ func TestGetVideoCrossChannelAliasConflictKeepsSuccessWithoutGatewayContentURL(t
 		if strings.Contains(candidate, newStatusAliasID) {
 			t.Fatalf("cross-channel alias conflict exposed an unpinned alias ID in URL: %+v", payload)
 		}
-		if candidate != expectedStableURL {
-			t.Fatalf("candidate URL %q does not match expected stable URL %q", candidate, expectedStableURL)
+		if candidate != upstreamVideoURL {
+			t.Fatalf("candidate URL %q does not match original provider URL %q", candidate, upstreamVideoURL)
 		}
 	}
 	if got := db.GetVideoTaskChannel(publicTaskID); got != channelB.ID {
@@ -644,8 +644,8 @@ func TestGetVideoCrossChannelAliasConflictKeepsSuccessWithoutGatewayContentURL(t
 		t.Fatalf("query for sharedProviderID routing = channelA:%d channelB:%d, want 1 and 3", channelACalls, channelBCalls)
 	}
 
-	// Subsequent content query by returned stable URL must route to channel B and use sharedProviderID upstream
-	contentReq := httptest.NewRequest(http.MethodGet, payload.VideoURL, nil)
+	// The explicit gateway content endpoint still routes to the pinned channel.
+	contentReq := httptest.NewRequest(http.MethodGet, expectedStableURL, nil)
 	contentReq.Host = "gateway.example.test"
 	contentResp := httptest.NewRecorder()
 	engine.ServeHTTP(contentResp, contentReq)
@@ -832,7 +832,7 @@ func TestGetVideoCrossChannelAliasConflictWriteFailureSuppressesStableURLAndReco
 		t.Fatalf("content body = %q, want mp4-content-bytes", recoveredContentResp.Body.String())
 	}
 
-	// 4. Subsequent status query after recovery now returns stable content URL and X-Relay-Task-Mapping: conflict
+	// 4. Recovery preserves the original media URL and discloses the alias conflict.
 	finalStatusReq := httptest.NewRequest(http.MethodGet, "/v1/videos/"+publicTaskID, nil)
 	finalStatusReq.Host = "gateway.example.test"
 	finalStatusResp := httptest.NewRecorder()
@@ -847,8 +847,8 @@ func TestGetVideoCrossChannelAliasConflictWriteFailureSuppressesStableURLAndReco
 	if err := json.Unmarshal(finalStatusResp.Body.Bytes(), &finalPayload); err != nil {
 		t.Fatal(err)
 	}
-	if finalPayload.VideoURL != gatewayStableURL {
-		t.Fatalf("final status VideoURL = %q, want %q", finalPayload.VideoURL, gatewayStableURL)
+	if finalPayload.VideoURL != upstreamVideoURL {
+		t.Fatalf("final status VideoURL = %q, want %q", finalPayload.VideoURL, upstreamVideoURL)
 	}
 
 	// Confirm restart survives: close & reinit DB from disk
@@ -1032,7 +1032,7 @@ func TestGetVideoCrossChannelAliasConflictDatabaseAndJournalFailureSuppressesSta
 	if recoveredStatusResp.Code != http.StatusOK {
 		t.Fatalf("recovered status query failed, got %d: %s", recoveredStatusResp.Code, recoveredStatusResp.Body.String())
 	}
-	// Once DB write succeeds on query, header is "conflict" and stable content URL is published
+	// Once DB write succeeds, preserve the original URL under disabled retention.
 	if recoveredStatusResp.Header().Get("X-Relay-Task-Mapping") != "conflict" {
 		t.Fatalf("recovered status mapping header = %q, want conflict", recoveredStatusResp.Header().Get("X-Relay-Task-Mapping"))
 	}
@@ -1040,8 +1040,8 @@ func TestGetVideoCrossChannelAliasConflictDatabaseAndJournalFailureSuppressesSta
 	if err := json.Unmarshal(recoveredStatusResp.Body.Bytes(), &recoveredPayload); err != nil {
 		t.Fatal(err)
 	}
-	if recoveredPayload.VideoURL != gatewayStableURL {
-		t.Fatalf("recovered status VideoURL = %q, want %q", recoveredPayload.VideoURL, gatewayStableURL)
+	if recoveredPayload.VideoURL != upstreamVideoURL {
+		t.Fatalf("recovered status VideoURL = %q, want %q", recoveredPayload.VideoURL, upstreamVideoURL)
 	}
 
 	// In SQLite DB, TaskAlias is now durably stored as sharedProviderID

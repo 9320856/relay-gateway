@@ -185,6 +185,7 @@ type ContentResult struct {
 	HTTPStatus int
 	Headers    http.Header
 	Body       io.ReadCloser
+	RequestURL string
 }
 
 type OperationExecutor interface {
@@ -376,7 +377,7 @@ func (e *HTTPExecutor) FetchContent(ctx context.Context, profile CompiledProfile
 			return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header}, executorErrorWithResponse("content", resp.StatusCode, resp.Header.Get("Content-Type"), string(body), resp.Header.Get("Retry-After"), false, resp.StatusCode >= 500, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		}
 		transferred = true
-		return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}}, nil
+		return ContentResult{HTTPStatus: resp.StatusCode, Headers: resp.Header, Body: &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}, RequestURL: httpReq.URL.String()}, nil
 	}
 	return ContentResult{}, errors.New("no content credentials available")
 }

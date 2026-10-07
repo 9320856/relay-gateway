@@ -36,7 +36,7 @@
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span>
-        <span>V0.2.2 · 开发测试版</span>
+        <span>V0.2.3 · 开发测试版</span>
       </div>
     </aside>
 
@@ -304,6 +304,14 @@
         </div>
         <label class="full">Base URL<input name="base_url" required placeholder="https://api.openai.com/v1"></label>
         <label class="full">上游 Key（每行一个）<textarea name="api_keys_raw" rows="4" spellcheck="false" placeholder="sk-..."></textarea></label>
+        <label class="full">媒体保存
+          <select name="media_retention" aria-describedby="channel-media-retention-help">
+            <option value="disabled" selected>不保存</option>
+            <option value="best_effort">尽力保存</option>
+            <option value="required">必须保存</option>
+          </select>
+          <small id="channel-media-retention-help">统一用于此渠道的图片和视频。尽力保存和必须保存会自动下载到网关；尽力保存失败仍可返回上游结果，必须保存成功后才返回完成结果，失败时同步请求报错，异步任务保持待完成或失败。</small>
+        </label>
 
         <section class="full model-editor" aria-labelledby="model-editor-title">
           <div class="model-editor-head">

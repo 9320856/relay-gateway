@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -91,6 +92,15 @@ func digest(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// sessionCSRFToken is stable for one session, so loading another console tab
+// cannot revoke tokens already in use. The cookie remains HttpOnly; a CSRF
+// token cannot be used to recover the random session secret or authenticate.
+func sessionCSRFToken(sessionToken string) string {
+	mac := hmac.New(sha256.New, []byte(sessionToken))
+	_, _ = mac.Write([]byte("relay-gateway/admin-session/csrf/v1"))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -138,10 +148,7 @@ func newSessionRecord(tx *gorm.DB, user db.AdminUserModel, clientIP, userAgent s
 	if err != nil {
 		return nil, err
 	}
-	csrf, err := randomToken(32)
-	if err != nil {
-		return nil, err
-	}
+	csrf := sessionCSRFToken(token)
 	now := time.Now().UTC()
 	record := db.AdminSessionModel{TokenHash: digest(token), AdminUserID: user.ID, SessionVersion: user.SessionVersion, CSRFHash: digest(csrf), ClientIP: clientIP, UserAgent: truncate(userAgent, 512), CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(SessionLifetime)}
 	if err := tx.Create(&record).Error; err != nil {
@@ -288,15 +295,20 @@ func ValidateCSRF(sessionToken, csrfToken string) error {
 }
 
 func ValidateCSRFContext(ctx context.Context, sessionToken, csrfToken string) error {
-	conn := db.SQLDBForContext(ctx)
-	if conn == nil || sessionToken == "" || csrfToken == "" {
+	if csrfToken == "" {
 		return ErrInvalidCSRF
 	}
-	var row db.AdminSessionModel
-	if err := conn.Select("csrf_hash").First(&row, "token_hash = ?", digest(sessionToken)).Error; err != nil {
+	storedHash, err := csrfSessionHashContext(ctx, sessionToken)
+	if err != nil {
 		return ErrInvalidCSRF
 	}
-	if subtle.ConstantTimeCompare([]byte(row.CSRFHash), []byte(digest(csrfToken))) != 1 {
+	submittedHash := []byte(digest(csrfToken))
+	derivedValid := subtle.ConstantTimeCompare(submittedHash, []byte(digest(sessionCSRFToken(sessionToken))))
+	// Sessions created before stable tokens were introduced retain their old
+	// random-token verifier. Accept it until session revocation/expiry without
+	// replacing it when another tab asks for the stable token.
+	storedValid := subtle.ConstantTimeCompare(submittedHash, []byte(storedHash))
+	if derivedValid|storedValid != 1 {
 		return ErrInvalidCSRF
 	}
 	return nil
@@ -307,23 +319,38 @@ func CSRFToken(sessionToken string) (string, error) {
 }
 
 func CSRFTokenContext(ctx context.Context, sessionToken string) (string, error) {
-	conn := db.SQLDBForContext(ctx)
-	if conn == nil {
-		return "", ErrInvalidSession
-	}
-	// CSRF values are deliberately not recoverable. Rotate it when /me is called and return the new raw token.
-	csrf, err := randomToken(32)
-	if err != nil {
+	if _, err := csrfSessionHashContext(ctx, sessionToken); err != nil {
 		return "", err
 	}
-	result := conn.Model(&db.AdminSessionModel{}).Where("token_hash = ?", digest(sessionToken)).Update("csrf_hash", digest(csrf))
-	if result.Error != nil {
-		return "", result.Error
-	}
-	if result.RowsAffected != 1 {
+	return sessionCSRFToken(sessionToken), nil
+}
+
+// csrfSessionHashContext checks revocation, expiry and account version in one
+// read. Both token retrieval and verification use this check; neither writes
+// session state or needs a process-local lock under concurrent /auth/me calls.
+func csrfSessionHashContext(ctx context.Context, sessionToken string) (string, error) {
+	conn := db.SQLDBForContext(ctx)
+	if conn == nil || strings.TrimSpace(sessionToken) == "" {
 		return "", ErrInvalidSession
 	}
-	return csrf, nil
+	var row db.AdminSessionModel
+	err := conn.Model(&db.AdminSessionModel{}).
+		Select("admin_session_models.csrf_hash", "admin_session_models.expires_at").
+		Joins("JOIN admin_user_models ON admin_user_models.id = admin_session_models.admin_user_id AND admin_user_models.session_version = admin_session_models.session_version").
+		Where("admin_session_models.token_hash = ?", digest(sessionToken)).
+		Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", ErrInvalidSession
+		}
+		return "", err
+	}
+	// Check the current time after any connection-pool wait, rather than using
+	// a timestamp captured before a heavily contended lookup was admitted.
+	if !row.ExpiresAt.After(time.Now().UTC()) {
+		return "", ErrInvalidSession
+	}
+	return row.CSRFHash, nil
 }
 
 func Logout(token string) error {

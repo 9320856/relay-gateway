@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+	"relay-gateway/adapter"
 	"relay-gateway/db"
 	"relay-gateway/media"
 	"relay-gateway/protocol"
@@ -18,6 +21,8 @@ import (
 )
 
 const defaultMediaMaterializationMaxBytes = int64(512 << 20)
+
+var mediaURLFetcherFactory = media.NewHTTPSourceFetcher
 
 // MediaMaterializationPoller processes durable result URLs. It never submits
 // or polls provider tasks, so a retry can only repeat local storage work.
@@ -99,20 +104,15 @@ func fetchProfileProviderContent(ctx context.Context, taskRunID string) (media.F
 	if err != nil {
 		return media.FetchedSource{}, fmt.Errorf("load profile content task: %w", err)
 	}
+	if strings.EqualFold(strings.TrimSpace(run.Engine), "legacy") {
+		return fetchLegacyProviderContent(ctx, run)
+	}
 	if !strings.EqualFold(strings.TrimSpace(run.Engine), "profile") {
-		return media.FetchedSource{}, errors.New("profile content media task is not Profile-owned")
+		return media.FetchedSource{}, errors.New("content media task has an unknown engine")
 	}
-	revision, err := db.GetProtocolProfileRevisionContext(ctx, run.ProfileID, run.ProfileRevision)
+	compiled, err := db.LoadTaskProfileContext(ctx, run)
 	if err != nil {
-		return media.FetchedSource{}, fmt.Errorf("load profile content revision: %w", err)
-	}
-	var source protocol.Profile
-	if err := json.Unmarshal([]byte(revision.ContentJSON), &source); err != nil {
-		return media.FetchedSource{}, fmt.Errorf("decode profile content revision: %w", err)
-	}
-	compiled, err := protocol.Compile(source)
-	if err != nil {
-		return media.FetchedSource{}, fmt.Errorf("compile profile content revision: %w", err)
+		return media.FetchedSource{}, fmt.Errorf("load profile content snapshot: %w", err)
 	}
 	var op protocol.Operation
 	found := false
@@ -129,11 +129,24 @@ func fetchProfileProviderContent(ctx context.Context, taskRunID string) (media.F
 	if err != nil {
 		return media.FetchedSource{}, fmt.Errorf("load profile content channel: %w", err)
 	}
-	// Do not follow a provider redirect here. A redirecting provider response
-	// can be retried through its declared Content operation, while following it
-	// inside this worker could forward credentials to an unrelated host.
+	// Open the authenticated endpoint once, then follow any CDN location with
+	// the public media fetcher so credentials never cross to another host.
 	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	upstream := channel.ToUpstreamChannel()
+	upstream.Headers = maps.Clone(upstream.Headers)
+	removeContentRangeHeaders(upstream.Headers)
+	// CompiledProfile.Profile returns an owned copy. Removing a configured
+	// Range here does not change the persisted snapshot or its digest.
+	contentProfile := compiled.Profile()
+	for i := range contentProfile.Operations {
+		if contentProfile.Operations[i].Operation == run.Operation && contentProfile.Operations[i].Content != nil {
+			removeContentRangeHeaders(contentProfile.Operations[i].Content.Headers)
+		}
+	}
+	compiled, err = protocol.Compile(contentProfile)
+	if err != nil {
+		return media.FetchedSource{}, err
+	}
 	content, err := service.DefaultDispatcher.ProfileExecutor(protocol.NewHTTPExecutor(client), run.ChannelID).FetchContent(ctx, compiled, run.Operation, protocol.Request{
 		BaseURL: upstream.BaseURL, APIKeys: upstream.GetEffectiveKeys(), Headers: upstream.Headers, TaskID: run.ProviderTaskID,
 	})
@@ -143,9 +156,21 @@ func fetchProfileProviderContent(ctx context.Context, taskRunID string) (media.F
 	if content.Body == nil {
 		return media.FetchedSource{}, errors.New("profile content response body is missing")
 	}
-	if content.HTTPStatus < http.StatusOK || content.HTTPStatus >= http.StatusMultipleChoices {
+	if content.HTTPStatus != http.StatusOK || strings.TrimSpace(content.Headers.Get("Content-Range")) != "" {
+		if content.HTTPStatus >= 300 && content.HTTPStatus < 400 {
+			location, err := url.Parse(strings.TrimSpace(content.Headers.Get("Location")))
+			_ = content.Body.Close()
+			if err != nil || location == nil || location.String() == "" {
+				return media.FetchedSource{}, errors.New("invalid content redirect")
+			}
+			base, err := url.Parse(content.RequestURL)
+			if err != nil {
+				return media.FetchedSource{}, err
+			}
+			return mediaURLFetcherFactory(base.ResolveReference(location).String(), upstream.BaseURL).Fetch(ctx, media.MediaResult{SourceKind: media.SourceURL, Locator: base.ResolveReference(location).String(), MaxBytes: defaultMediaMaterializationMaxBytes})
+		}
 		_ = content.Body.Close()
-		return media.FetchedSource{}, fmt.Errorf("profile content returned status %d", content.HTTPStatus)
+		return media.FetchedSource{}, fmt.Errorf("profile content requires a complete response, received %d", content.HTTPStatus)
 	}
 	contentType := strings.TrimSpace(content.Headers.Get("Content-Type"))
 	// Fanren and a few OpenAI-compatible gateways omit the MIME header on the
@@ -156,6 +181,52 @@ func fetchProfileProviderContent(ctx context.Context, taskRunID string) (media.F
 		contentType = "video/mp4"
 	}
 	return media.FetchedSource{Body: content.Body, ContentType: contentType}, nil
+}
+
+func fetchLegacyProviderContent(ctx context.Context, run *db.TaskRun) (media.FetchedSource, error) {
+	channel, err := db.GetChannelModelContext(ctx, run.ChannelID)
+	if err != nil {
+		return media.FetchedSource{}, err
+	}
+	upstream := channel.ToUpstreamChannel()
+	upstream.Headers = maps.Clone(upstream.Headers)
+	removeContentRangeHeaders(upstream.Headers)
+	opener, ok := adapter.Get(upstream.Type).(adapter.VideoContentOpener)
+	if !ok {
+		return media.FetchedSource{}, errors.New("channel does not support streaming video content")
+	}
+	response, err := opener.OpenVideoContent(ctx, &upstream, run.ProviderTaskID, nil)
+	if err != nil {
+		return media.FetchedSource{}, err
+	}
+	if response == nil || response.Body == nil {
+		return media.FetchedSource{}, errors.New("provider content body is missing")
+	}
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		location, err := response.Location()
+		response.Body.Close()
+		if err != nil {
+			return media.FetchedSource{}, err
+		}
+		return mediaURLFetcherFactory(location.String(), upstream.BaseURL).Fetch(ctx, media.MediaResult{SourceKind: media.SourceURL, Locator: location.String(), MaxBytes: defaultMediaMaterializationMaxBytes})
+	}
+	if response.StatusCode != http.StatusOK || strings.TrimSpace(response.Header.Get("Content-Range")) != "" {
+		response.Body.Close()
+		return media.FetchedSource{}, fmt.Errorf("provider content requires a complete response, received %d", response.StatusCode)
+	}
+	contentType := strings.TrimSpace(response.Header.Get("Content-Type"))
+	if contentType == "" || strings.EqualFold(contentType, "application/octet-stream") {
+		contentType = "video/mp4"
+	}
+	return media.FetchedSource{Body: response.Body, ContentType: contentType}, nil
+}
+
+func removeContentRangeHeaders(headers map[string]string) {
+	for name := range headers {
+		if strings.EqualFold(name, "Range") || strings.EqualFold(name, "If-Range") {
+			delete(headers, name)
+		}
+	}
 }
 
 func (p *MediaMaterializationPoller) complete(job *db.MediaMaterializationJob) (bool, error) {
@@ -229,19 +300,49 @@ func defaultURLFetcherForAsset(ctx context.Context, asset *db.MediaAsset) media.
 	if asset == nil {
 		return media.HTTPSourceFetcher{}
 	}
-	fetcher := media.NewHTTPSourceFetcher(asset.SourceLocator, "")
-	if strings.TrimSpace(asset.TaskRunID) == "" {
+	fetcher := mediaURLFetcherFactory(asset.SourceLocator, "")
+	var run *db.TaskRun
+	if strings.TrimSpace(asset.TaskRunID) != "" {
+		var err error
+		run, err = db.GetTaskRunContext(ctx, asset.TaskRunID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fetcher
+		}
+	}
+	var channelID string
+	if run == nil {
+		// Direct responses may use a synthetic task ID without persisting a
+		// TaskRun. Their durable originating API-call log records the selected
+		// upstream, including for background retries of synchronous failures.
+		originID := strings.TrimSpace(asset.OriginRequestID)
+		conn := db.SQLDBForContext(ctx)
+		if originID == "" || conn == nil {
+			return fetcher
+		}
+		var origin db.RequestLogModel
+		if err := conn.Select("channel_id").Where("id = ? AND kind = ?", originID, "api_call").First(&origin).Error; err != nil {
+			return fetcher
+		}
+		channelID = origin.ChannelID
+	} else {
+		// Both engines persist the selected upstream in TaskRun. A damaged
+		// existing task must not fall back to an origin log, mutable task alias,
+		// or the currently selected/default upstream channel.
+		switch strings.ToLower(strings.TrimSpace(run.Engine)) {
+		case "profile", "legacy":
+		default:
+			return fetcher
+		}
+		channelID = run.ChannelID
+	}
+	if strings.TrimSpace(channelID) == "" {
 		return fetcher
 	}
-	run, err := db.GetTaskRunContext(ctx, asset.TaskRunID)
-	if err != nil || !strings.EqualFold(strings.TrimSpace(run.Engine), "profile") || strings.TrimSpace(run.ChannelID) == "" {
-		return fetcher
-	}
-	channel, err := db.GetChannelModelContext(ctx, run.ChannelID)
+	channel, err := db.GetChannelModelContext(ctx, channelID)
 	if err != nil {
 		return fetcher
 	}
-	return media.NewHTTPSourceFetcher(asset.SourceLocator, channel.BaseURL)
+	return mediaURLFetcherFactory(asset.SourceLocator, channel.BaseURL)
 }
 
 func (p *MediaMaterializationPoller) lease() time.Duration {

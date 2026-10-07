@@ -128,7 +128,7 @@ func TestPlaygroundVideoPollsUpdateCreationAuditAndRemoveChildLogs(t *testing.T)
 	if err := json.Unmarshal(completed.Body.Bytes(), &completedPayload); err != nil {
 		t.Fatal(err)
 	}
-	wantVideoURL := "http://gateway.test/api/playground/video-content/playground-provider"
+	wantVideoURL := "https://cdn.example.test/temporary.mp4"
 	if completedPayload["task_status"] != "completed" || completedPayload["video_url"] != wantVideoURL {
 		t.Fatalf("unexpected completed payload: %v", completedPayload)
 	}
@@ -136,7 +136,7 @@ func TestPlaygroundVideoPollsUpdateCreationAuditAndRemoveChildLogs(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Log.AsyncTaskStatus != "completed" || detail.Log.AsyncPollCount != 2 || detail.Log.AsyncCompletedAt == nil || !strings.Contains(detail.Log.AsyncResultBody, "/api/playground/video-content/playground-provider") {
+	if detail.Log.AsyncTaskStatus != "completed" || detail.Log.AsyncPollCount != 2 || detail.Log.AsyncCompletedAt == nil || !strings.Contains(detail.Log.AsyncResultBody, wantVideoURL) {
 		t.Fatalf("completed poll did not update creation audit: %+v", detail.Log)
 	}
 	if rows, total, err = audit.List(audit.ListQuery{Page: 1, PageSize: 10}); err != nil || total != 1 || len(rows) != 1 || rows[0].ID != parentID {
@@ -146,7 +146,7 @@ func TestPlaygroundVideoPollsUpdateCreationAuditAndRemoveChildLogs(t *testing.T)
 		t.Fatalf("status calls = %d, want 2", statusCalls.Load())
 	}
 
-	contentRequest := httptest.NewRequest(http.MethodGet, wantVideoURL, nil)
+	contentRequest := httptest.NewRequest(http.MethodGet, "http://gateway.test/api/playground/video-content/playground-provider", nil)
 	contentRequest.Header.Set("Range", "bytes=0-4")
 	content := httptest.NewRecorder()
 	engine.ServeHTTP(content, contentRequest)

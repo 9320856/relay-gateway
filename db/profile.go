@@ -241,60 +241,98 @@ func SaveProtocolProfileRevision(r *ProtocolProfileRevision) error {
 }
 
 func SaveProtocolProfileRevisionContext(ctx context.Context, r *ProtocolProfileRevision) error {
-	db, err := profileDB(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	database, err := profileDB(ctx)
 	if err != nil {
 		return err
 	}
 	if r == nil || strings.TrimSpace(r.ProfileID) == "" || r.Revision <= 0 {
 		return errors.New("profile revision identity is required")
 	}
-	r.ProfileID = strings.TrimSpace(r.ProfileID)
-	if r.State == "" {
-		r.State = ProfileRevisionDraft
+	candidate := *r
+	candidate.ProfileID = strings.TrimSpace(candidate.ProfileID)
+	if candidate.State == "" {
+		candidate.State = ProfileRevisionDraft
 	}
-	if r.State != ProfileRevisionDraft && r.State != ProfileRevisionPublished && r.State != ProfileRevisionRetired {
-		return fmt.Errorf("%w: %q", ErrInvalidRevisionState, r.State)
+	if candidate.State != ProfileRevisionDraft && candidate.State != ProfileRevisionPublished && candidate.State != ProfileRevisionRetired {
+		return fmt.Errorf("%w: %q", ErrInvalidRevisionState, candidate.State)
 	}
-	var profile ProtocolProfile
-	if err := db.First(&profile, "id = ?", r.ProfileID).Error; err != nil {
-		return fmt.Errorf("load profile %q: %w", r.ProfileID, err)
-	}
-	var old ProtocolProfileRevision
-	if e := db.Where("profile_id = ? AND revision = ?", r.ProfileID, r.Revision).First(&old).Error; e == nil {
-		switch old.State {
-		case ProfileRevisionPublished:
-			return ErrPublishedRevisionImmutable
-		case ProfileRevisionRetired:
-			return ErrRetiredRevisionImmutable
+	save := func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
+		// Reserve the SQLite writer before reading the revision, as revision
+		// allocation does. A concurrent publish must finish either before this
+		// state check or after the save; it cannot slip between them. The no-op
+		// update also checks that the owning profile still exists.
+		result := tx.Model(&ProtocolProfile{}).Where("id = ?", candidate.ProfileID).
+			UpdateColumn("latest_revision", gorm.Expr("latest_revision"))
+		if result.Error != nil {
+			return result.Error
 		}
-		r.ID, r.CreatedAt = old.ID, old.CreatedAt
-		if err := db.Save(r).Error; err != nil {
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("load profile %q: %w", candidate.ProfileID, gorm.ErrRecordNotFound)
+		}
+		var old ProtocolProfileRevision
+		if err := tx.Where("profile_id = ? AND revision = ?", candidate.ProfileID, candidate.Revision).First(&old).Error; err == nil {
+			switch old.State {
+			case ProfileRevisionPublished:
+				return ErrPublishedRevisionImmutable
+			case ProfileRevisionRetired:
+				return ErrRetiredRevisionImmutable
+			case ProfileRevisionDraft:
+			default:
+				return fmt.Errorf("%w: %q", ErrInvalidRevisionState, old.State)
+			}
+			candidate.ID, candidate.CreatedAt = old.ID, old.CreatedAt
+			// An update must never fall back to GORM Save's create/upsert path.
+			// Keep the state predicate on the write itself as an additional guard.
+			result = tx.Model(&candidate).Where("state = ?", ProfileRevisionDraft).
+				Select("schema_version", "content_json", "content_digest", "state", "updated_at").Updates(&candidate)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return gorm.ErrRecordNotFound
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		} else {
+			// ProfileID and Revision identify this API's target; a copied ID
+			// must not collide with a different revision when creating it.
+			candidate.ID = 0
+			if err := tx.Create(&candidate).Error; err != nil {
+				return err
+			}
 		}
-		if r.Revision > profile.LatestRevision {
-			return db.Model(&profile).Update("latest_revision", r.Revision).Error
-		}
-		return nil
-	} else if !errors.Is(e, gorm.ErrRecordNotFound) {
-		return e
+		return tx.Model(&ProtocolProfile{}).
+			Where("id = ? AND latest_revision < ?", candidate.ProfileID, candidate.Revision).
+			Update("latest_revision", candidate.Revision).Error
 	}
-	if err := db.Create(r).Error; err != nil {
+	// A caller-owned transaction gets a savepoint so a handled save error
+	// cannot leave its insert or metadata update behind. Keep savepoint rollback
+	// on the owner's live context even if the operation context is canceled.
+	if HasContextTransaction(ctx) {
+		database = DBForContext(ctx)
+	}
+	if err := database.Transaction(save); err != nil {
 		return err
 	}
-	if r.Revision > profile.LatestRevision {
-		return db.Model(&profile).Update("latest_revision", r.Revision).Error
-	}
+	*r = candidate
 	return nil
 }
 
 // DeleteProtocolProfileRevisionContext removes an unreferenced custom revision.
 // A published or retired revision can be removed once it has no channel
-// bindings and no active task runs. Completed task history is detached from the
-// catalog entry before deletion so the audit record remains available without
-// pointing at a missing immutable revision. The profile's latest revision
+// bindings and no active task runs. Completed Profile task history is archived
+// by content digest before being detached from the catalog, preserving its
+// immutable definition for later reads and retries. The profile's latest revision
 // pointer is recalculated after deletion so a later draft can reuse the next
 // available number without leaving stale metadata behind.
 func DeleteProtocolProfileRevisionContext(ctx context.Context, profileID string, revision int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	database, err := profileDB(ctx)
 	if err != nil {
 		return err
@@ -304,6 +342,7 @@ func DeleteProtocolProfileRevisionContext(ctx context.Context, profileID string,
 		return errors.New("profile revision identity is required")
 	}
 	remove := func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
 		var profile ProtocolProfile
 		if err := tx.Where("id = ?", profileID).First(&profile).Error; err != nil {
 			return err
@@ -338,6 +377,9 @@ func DeleteProtocolProfileRevisionContext(ctx context.Context, profileID string,
 		if activeTaskCount > 0 {
 			return fmt.Errorf("%w: %d", ErrRevisionHasActiveTasks, activeTaskCount)
 		}
+		if err := archiveProfileTaskRevisions(tx, profileID, revision); err != nil {
+			return err
+		}
 		if err := tx.Model(&TaskRun{}).
 			Where("profile_id = ? AND profile_revision = ?", profileID, revision).
 			Updates(map[string]any{"profile_id": "", "profile_revision": 0}).Error; err != nil {
@@ -356,10 +398,10 @@ func DeleteProtocolProfileRevisionContext(ctx context.Context, profileID string,
 		}
 		return tx.Model(&ProtocolProfile{}).Where("id = ?", profileID).Update("latest_revision", latestResult.Value).Error
 	}
-	if !HasContextTransaction(ctx) {
-		return database.Transaction(remove)
+	if HasContextTransaction(ctx) {
+		database = DBForContext(ctx)
 	}
-	return remove(database)
+	return database.Transaction(remove)
 }
 
 func DeleteProtocolProfileRevision(profileID string, revision int) error {
@@ -449,9 +491,13 @@ func RetireProtocolProfileRevisionContext(ctx context.Context, profileID string,
 }
 
 // DeleteProtocolProfileContext deletes a custom protocol profile and its
-// revisions if and only if it has zero bindings and zero historical task runs.
+// revisions once it has zero bindings and no active task runs. Historical
+// Profile tasks retain their immutable protocol in the digest archive.
 // Built-in profiles cannot be deleted.
 func DeleteProtocolProfileContext(ctx context.Context, profileID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := profileDB(ctx)
 	if err != nil {
 		return err
@@ -461,6 +507,7 @@ func DeleteProtocolProfileContext(ctx context.Context, profileID string) error {
 		return errors.New("profile id is required")
 	}
 	deleteProfile := func(tx *gorm.DB) error {
+		tx = tx.WithContext(ctx)
 		var profile ProtocolProfile
 		if err := tx.Where("id = ?", profileID).First(&profile).Error; err != nil {
 			return err
@@ -487,6 +534,9 @@ func DeleteProtocolProfileContext(ctx context.Context, profileID string) error {
 			if activeCount > 0 {
 				return fmt.Errorf("%w: %d 个未完成任务", ErrProfileHasTaskRuns, activeCount)
 			}
+			if err := archiveProfileTaskRevisions(tx, profileID, 0); err != nil {
+				return err
+			}
 			// Completed tasks remain as audit history but no longer depend on the
 			// deleted catalog entry. Keep their execution/result data intact.
 			if err := tx.Model(&TaskRun{}).Where("profile_id = ?", profileID).Updates(map[string]any{"profile_id": "", "profile_revision": 0}).Error; err != nil {
@@ -498,10 +548,10 @@ func DeleteProtocolProfileContext(ctx context.Context, profileID string) error {
 		}
 		return tx.Where("id = ?", profileID).Delete(&ProtocolProfile{}).Error
 	}
-	if !HasContextTransaction(ctx) {
-		return db.Transaction(deleteProfile)
+	if HasContextTransaction(ctx) {
+		db = DBForContext(ctx)
 	}
-	return deleteProfile(db)
+	return db.Transaction(deleteProfile)
 }
 
 func DeleteProtocolProfile(profileID string) error {

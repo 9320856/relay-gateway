@@ -160,17 +160,18 @@ func TestLocalMockEndToEndLifecycle(t *testing.T) {
 		upstream := newE2EUpstream(t, kind)
 		upstreams[kind] = upstream
 		payload, err := json.Marshal(map[string]any{
-			"id":           "e2e-" + kind,
-			"name":         "E2E " + kind,
-			"type":         kind,
-			"base_url":     upstream.server.URL + "/v1",
-			"enabled":      true,
-			"priority":     1,
-			"weight":       1,
-			"fetch_models": false,
-			"models_raw":   models[kind],
-			"headers_raw":  "",
-			"api_key":      upstream.apiKey,
+			"id":              "e2e-" + kind,
+			"name":            "E2E " + kind,
+			"type":            kind,
+			"base_url":        upstream.server.URL + "/v1",
+			"enabled":         true,
+			"priority":        1,
+			"weight":          1,
+			"fetch_models":    false,
+			"models_raw":      models[kind],
+			"headers_raw":     "",
+			"api_key":         upstream.apiKey,
+			"media_retention": "required",
 		})
 		if err != nil {
 			t.Fatal(err)

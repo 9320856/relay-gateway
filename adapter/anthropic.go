@@ -73,7 +73,7 @@ func (a *AnthropicAdapter) ChatCompletions(ctx context.Context, channel *config.
 		if err != nil {
 			return err
 		}
-		copyHeader(w, resp.Header)
+		httpforward.CopyTransformedHeaders(w, resp.Header)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(resp.StatusCode)
 		if _, err := w.Write(converted); err != nil {
@@ -290,11 +290,10 @@ func mapStopReason(reason string) string {
 }
 
 func streamAnthropicAsOpenAI(ctx context.Context, resp *http.Response, fallbackModel string, w http.ResponseWriter) error {
-	copyHeader(w, resp.Header)
+	httpforward.CopyTransformedHeaders(w, resp.Header)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Del("Content-Length")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(resp.Body)

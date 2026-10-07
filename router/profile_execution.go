@@ -105,6 +105,8 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 		if err != nil {
 			return nil, candidate, true, err
 		}
+		op = applyChannelMediaRetention(op, candidate)
+		setChannelMediaResponsePolicy(c, op.EffectiveMediaRetention())
 		body, err := videoProfileBody(req, candidate)
 		if err != nil {
 			return nil, candidate, true, err
@@ -191,6 +193,7 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 				result.TaskID = run.Accepted.TaskID
 			}
 		}
+		result.ResultURLs = normalizeProfileImageSources(result.ResultURLs, candidate.BaseURL)
 		if op.ExecutionMode == protocol.ExecutionAsync && strings.TrimSpace(run.Accepted.TaskID) == "" {
 			if reservationID != "" {
 				_ = db.UpdateTaskRunSubmissionStateContext(context.Background(), reservationID, "submission_unknown", "profile async submit returned no task ID")
@@ -199,6 +202,13 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			return nil, candidate, true, errors.New("profile async submit returned no task ID")
 		}
 		response := profileVideoResponse(result, op.ExecutionMode == protocol.ExecutionAsync)
+		retention := op.EffectiveMediaRetention()
+		if op.ExecutionMode == protocol.ExecutionDirect && response != nil {
+			taskRunID := profileTaskRunID(candidate.ID, idempotencyKey, binding.Operation)
+			if mediaErr := retainMediaResponse(c, taskRunID, asyncTaskKindVideo, candidate.BaseURL, retention, response, result.ResultURLs); mediaErr != nil {
+				return nil, candidate, true, fmt.Errorf("profile video media materialization failed: %w", mediaErr)
+			}
+		}
 		if op.ExecutionMode == protocol.ExecutionAsync && response != nil && response.TaskID != "" {
 			// Persist the TaskRun before creating media rows. Media assets have a
 			// durable TaskRun owner, and using the deterministic ID before this
@@ -208,13 +218,12 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			if taskRunID == "" {
 				taskRunID = profileTaskRunID(candidate.ID, run.Accepted.TaskID, binding.Operation)
 			}
-			retention := op.EffectiveMediaRetention()
 			persistResponse := response
 			// Required gateway-wait media remains processing until the local
 			// object is available. This lets a failed materialization retry from
 			// the durable provider result without attempting an invalid completed
 			// to processing state transition.
-			if (profileMediaRequired() || retention == protocol.MediaRetentionRequired) && op.PollingMode == protocol.PollingGatewayWait && strings.TrimSpace(response.VideoURL) != "" {
+			if retention == protocol.MediaRetentionRequired && profileResultSucceeded(result, op) {
 				persistResponse = profileVideoResponse(result, op.ExecutionMode == protocol.ExecutionAsync)
 				persistResponse.Status = model.VideoStatusProcessing
 			}
@@ -227,16 +236,14 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 			}
 			taskRunID = persistedTaskRunID
 			response.ID, response.TaskID = persistResponse.ID, persistResponse.TaskID
-			if len(result.ResultURLs) > 0 && profileMediaRetentionEnabled(op) && !(retention == protocol.MediaRetentionRequired && op.PollingMode == protocol.PollingGatewayWait) {
-				if _, mediaErr := db.EnsureTaskResultMediaContext(c.Request.Context(), taskRunID, asyncTaskKindVideo, result.ResultURLs); mediaErr != nil {
-					if reservationID != "" {
-						unlock()
-					}
-					return nil, candidate, true, fmt.Errorf("enqueue profile video result media: %w", mediaErr)
+			if err := prepareProfileAsyncMedia(c, taskRunID, asyncTaskKindVideo, op, result, response); err != nil {
+				if reservationID != "" {
+					unlock()
 				}
+				return nil, candidate, true, err
 			}
-			if (profileMediaRequired() || retention == protocol.MediaRetentionRequired) && op.PollingMode == protocol.PollingGatewayWait && strings.TrimSpace(response.VideoURL) != "" {
-				stableURL, materializeErr := materializeProfileVideoURL(c, taskRunID, response.VideoURL, candidate.BaseURL)
+			if retention == protocol.MediaRetentionRequired && op.PollingMode == protocol.PollingGatewayWait && len(result.ResultURLs) > 0 {
+				materializeErr := retainMediaResponse(c, taskRunID, asyncTaskKindVideo, candidate.BaseURL, retention, response, result.ResultURLs)
 				if materializeErr != nil {
 					response.VideoURL, response.URL, response.Data = "", "", nil
 					response.Status = "materializing"
@@ -245,7 +252,6 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 					// public response is scrubbed, while a later retry can still
 					// recreate a missing local asset/job without re-submitting.
 					persistResponse = profileVideoResponse(result, op.ExecutionMode == protocol.ExecutionAsync)
-					persistResponse.Status = model.VideoStatusProcessing
 					persistResponse.Error = response.Error
 					encoded, encodeErr := json.Marshal(persistableProfileVideoResponse(persistResponse))
 					if encodeErr != nil {
@@ -261,8 +267,6 @@ func profileEngineVideoCreateForChannel(c *gin.Context, req *model.VideoGenerati
 						return nil, candidate, true, fmt.Errorf("persist profile video materialization result: %w", updateErr)
 					}
 				} else {
-					response.VideoURL, response.URL = stableURL, stableURL
-					response.Data = []map[string]string{{"url": stableURL}}
 					encoded, encodeErr := json.Marshal(persistableProfileVideoResponse(profileVideoResponse(result, op.ExecutionMode == protocol.ExecutionAsync)))
 					if encodeErr != nil {
 						if reservationID != "" {
@@ -448,6 +452,8 @@ func persistProfileTaskProjection(c *gin.Context, channel *config.UpstreamChanne
 		lookupIDs = []string{gtID}
 	}
 	registration := newAsyncTaskMappingRegistration(c.Request.Context(), channel.ID, asyncTaskKindVideo, taskAlias, response.Status, lookupIDs...)
+	registration.Engine = "profile"
+	registration.MediaRetention = op.EffectiveMediaRetention()
 	if registration.empty() {
 		return ""
 	}
@@ -465,6 +471,7 @@ func persistProfileTaskProjection(c *gin.Context, channel *config.UpstreamChanne
 		ProfileID:       binding.ProfileID,
 		ProfileRevision: revision.Revision,
 		ProfileDigest:   compiled.Digest(),
+		MediaRetention:  op.EffectiveMediaRetention(),
 		PollingMode:     op.PollingMode,
 		ProviderTaskID:  accepted.TaskID,
 		SubmissionState: "accepted",

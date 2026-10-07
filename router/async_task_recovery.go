@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"relay-gateway/audit"
 	"relay-gateway/db"
+	"relay-gateway/media"
 )
 
 const (
@@ -33,22 +34,28 @@ const (
 // body, credential, or provider URL. It is all that is needed to restore local
 // routing after an upstream async task has already been accepted.
 type asyncTaskMappingRegistration struct {
+	Engine          string   `json:"engine,omitempty"`
 	ChannelID       string   `json:"channel_id"`
 	TaskKind        string   `json:"task_kind"`
 	TaskAlias       string   `json:"task_alias"`
 	InitialStatus   string   `json:"initial_status,omitempty"`
 	OriginRequestID string   `json:"origin_request_id,omitempty"`
+	MediaRetention  string   `json:"media_retention,omitempty"`
 	TaskIDs         []string `json:"task_ids"`
 }
 
 func newAsyncTaskMappingRegistration(ctx context.Context, channelID, taskKind, taskAlias, initialStatus string, taskIDs ...string) asyncTaskMappingRegistration {
 	registration := asyncTaskMappingRegistration{
+		Engine:          "legacy",
 		ChannelID:       strings.TrimSpace(channelID),
 		TaskKind:        strings.ToLower(strings.TrimSpace(taskKind)),
 		TaskAlias:       strings.TrimSpace(taskAlias),
 		InitialStatus:   truncateAsyncTaskMappingStatus(initialStatus),
 		OriginRequestID: audit.RequestID(ctx),
 		TaskIDs:         make([]string, 0, len(taskIDs)),
+	}
+	if selected, ok := ctx.Value(legacyMediaPolicyKey{}).(legacyMediaPolicy); ok && selected.ChannelID == registration.ChannelID {
+		registration.MediaRetention = selected.Retention
 	}
 	seen := make(map[string]struct{}, len(taskIDs))
 	for _, taskID := range taskIDs {
@@ -81,6 +88,9 @@ func (r asyncTaskMappingRegistration) empty() bool {
 }
 
 func (r asyncTaskMappingRegistration) valid() bool {
+	if _, err := media.NormalizeRetention(r.MediaRetention); err != nil {
+		return false
+	}
 	if r.empty() || (r.TaskKind != asyncTaskKindVideo && r.TaskKind != asyncTaskKindImage) || !db.IsValidTaskID(r.TaskAlias) {
 		return false
 	}
@@ -129,6 +139,13 @@ func persistAsyncTaskMappingRegistration(registration asyncTaskMappingRegistrati
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), asyncTaskMappingWriteTimeout)
 	defer cancel()
+	// Freeze the policy before publishing any mapping. If either local write
+	// fails, the journal retains the complete registration until both exist.
+	if registration.Engine != "profile" {
+		if err := ensureLegacyTaskRunContext(ctx, registration); err != nil {
+			return err
+		}
+	}
 	return db.EnsureTaskMappingsContext(ctx, registration.mappings()...)
 }
 
@@ -180,6 +197,25 @@ type asyncTaskMappingRecoveryItem struct {
 }
 
 var asyncTaskMappingRecoveries asyncTaskMappingRecoveryQueue
+
+// A durable journal can publish routing before SQLite becomes writable.
+// Preserve its frozen policy if a status request projects that cached route.
+func pendingLegacyRegistration(registration asyncTaskMappingRegistration) asyncTaskMappingRegistration {
+	q := &asyncTaskMappingRecoveries
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, err := q.loadLocked(); err != nil {
+		return registration
+	}
+	for _, item := range q.pending {
+		frozen := item.registration
+		if item.journaled && frozen.ChannelID == registration.ChannelID && frozen.TaskKind == registration.TaskKind && frozen.TaskAlias == registration.TaskAlias && frozen.OriginRequestID == registration.OriginRequestID {
+			registration.MediaRetention = frozen.MediaRetention
+			return registration
+		}
+	}
+	return registration
+}
 
 func asyncTaskMappingRecoveryJournalPath() string {
 	path := strings.TrimSpace(db.DatabasePath())

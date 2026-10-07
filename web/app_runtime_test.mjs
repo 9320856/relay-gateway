@@ -536,6 +536,8 @@ for (const kind of ["chat", "image", "video"]) {
     const profile = JSON.parse(vm.runInContext(`JSON.stringify(collectProfileFromEditor())`, context));
     const operation = profile.operations[0];
     assert.equal(operation.execution_mode, mode);
+    assert.equal(Object.hasOwn(operation, "media_retention"), false, "new profiles must leave media saving to the channel");
+    assert.equal(document.getElementById("profile-operation-editor").querySelector(".profile-op-retention"), null, "Profile operations must not expose media retention");
     if (mode === "direct") {
       assert.equal(operation.polling_mode, "off");
       assert.equal(operation.poll, undefined, "synchronous saves must omit hidden polling defaults");
@@ -578,6 +580,7 @@ assert.deepEqual(
 const multiOperationProfile = JSON.parse(vm.runInContext(`JSON.stringify(defaultMultiOperationProfileContent("example"))`, context));
 assert.deepEqual(multiOperationProfile.operations.map((operation) => operation.operation), ["chat.completions", "images.create", "video.create"]);
 assert.equal(multiOperationProfile.name, "example");
+assert.ok(multiOperationProfile.operations.every((operation) => !Object.hasOwn(operation, "media_retention")), "multi-operation templates must omit media retention");
 const selectedOperations = JSON.parse(vm.runInContext(`JSON.stringify(defaultMultiOperationProfileContent("selected", ["chat", "video"]))`, context));
 assert.deepEqual(selectedOperations.operations.map((operation) => operation.operation), ["chat.completions", "video.create"]);
 assert.deepEqual(
@@ -608,6 +611,7 @@ const createdProfileRequest = vm.runInContext("createdProfileRequest", context);
 assert.equal(createdProfileRequest.path, "/api/profiles");
 assert.equal(createdProfileRequest.options.body.id, undefined, "the server generates the internal ID");
 assert.deepEqual(Array.from(createdProfileRequest.options.body.profile.operations, (operation) => operation.operation), ["chat.completions", "video.create"]);
+assert.ok(Array.from(createdProfileRequest.options.body.profile.operations).every((operation) => !Object.hasOwn(operation, "media_retention")), "new Profile creation must not submit operation retention defaults");
 assert.equal(vm.runInContext("selectedProfileID", context), "generated-id");
 document.getElementById("profile-create-chat").checked = false;
 document.getElementById("profile-create-video").checked = false;
@@ -667,6 +671,41 @@ for (const strategy of ["client", "gateway_wait", "background"]) {
   }`, context);
   assert.equal(vm.runInContext(`collectProfileFromEditor().operations[0].polling_mode`, context), strategy, "editing legacy profiles must preserve their execution strategy");
 }
+
+// Removing the Profile setting must not rewrite historical revision JSON or
+// silently drop an old draft's retention field when another field is edited.
+for (const retention of ["disabled", "best_effort", "required"]) {
+  const legacyProfile = JSON.parse(vm.runInContext(`JSON.stringify(defaultMultiOperationProfileContent("legacy"))`, context));
+  legacyProfile.operations[1].media_retention = retention;
+  const legacyJSON = JSON.stringify(legacyProfile);
+  vm.runInContext(`
+    byId("profile-json").value = ${JSON.stringify(legacyJSON)};
+    renderProfileOperations(JSON.parse(byId("profile-json").value));
+  `, context);
+  assert.equal(document.getElementById("profile-json").value, legacyJSON, "rendering a legacy revision must not rewrite its JSON");
+  assert.equal(document.getElementById("profile-operation-editor").querySelector(".profile-op-retention"), null);
+  document.getElementById("profile-operation-editor").querySelectorAll(".profile-op-policy")[1].value = "edited-policy";
+  const collected = JSON.parse(vm.runInContext("JSON.stringify(collectProfileFromEditor())", context));
+  assert.equal(collected.operations[1].media_retention, retention, "editing another field retains the original legacy value on that operation");
+  assert.equal(collected.operations[1].policy, "edited-policy");
+  assert.equal(Object.hasOwn(collected.operations[0], "media_retention"), false, "an absent legacy field stays absent");
+  assert.equal(Object.hasOwn(collected.operations[2], "media_retention"), false, "retention must not leak to another operation");
+  vm.runInContext("syncProfileJSONFromEditor()", context);
+  assert.equal(JSON.parse(document.getElementById("profile-json").value).operations[1].media_retention, retention, "JSON synchronization preserves legacy retention");
+}
+vm.runInContext(`
+  selectedProfileID = "legacy-retention";
+  selectedProfileRevision = 1;
+  profileRevisions.set(selectedProfileID, [{ revision: 1, state: "draft" }]);
+  request = async (path, options) => { globalThis.savedLegacyProfileRequest = { path, options }; return {}; };
+  loadProfiles = async () => {};
+`, context);
+await vm.runInContext("saveProfileRevision()", context);
+const savedLegacyProfileRequest = vm.runInContext("savedLegacyProfileRequest", context);
+assert.equal(savedLegacyProfileRequest.options.method, "PUT");
+assert.equal(savedLegacyProfileRequest.options.body.profile.operations[1].media_retention, "required", "saving an existing draft keeps its legacy JSON field");
+context.request = originalRequest;
+context.loadProfiles = originalLoadProfiles;
 
 // Test collapsible operation cards and bulk toolbar
 const multiOps = JSON.parse(vm.runInContext(`JSON.stringify(defaultMultiOperationProfileContent("test-ops", ["chat", "image", "video"]))`, context));
@@ -751,6 +790,20 @@ const channelForm = channelDocument.getElementById("channel-form");
 channelForm.elements = Object.fromEntries(["id", "name", "base_url", "api_keys_raw", "models_raw", "headers_raw", "priority", "weight", "enabled", "fetch_models"].map((name) => [name, new FakeElement("input")]));
 channelForm.elements.type = new ChannelSelect();
 channelForm.elements.profile_id = new ChannelSelect();
+const dashboardHTML = fs.readFileSync(path.join(here, "dashboard.html"), "utf8");
+const channelRetentionMarkup = dashboardHTML.match(/<select\b[^>]*name="media_retention"[^>]*>([\s\S]*?)<\/select>/);
+assert.ok(channelRetentionMarkup, "the channel form must submit a named media retention field");
+assert.equal(dashboardHTML.match(/name="media_retention"/g)?.length, 1, "media saving has one channel setting for images and videos");
+channelForm.elements.media_retention = new ChannelSelect();
+for (const [, value, attributes, label] of channelRetentionMarkup[1].matchAll(/<option value="([^"]+)"([^>]*)>([^<]+)<\/option>/g)) {
+  const option = new FakeElement("option");
+  option.value = value;
+  option.textContent = label;
+  option.selected = /\bselected\b/.test(attributes);
+  channelForm.elements.media_retention.append(option);
+}
+assert.deepEqual(channelForm.elements.media_retention.options.map((option) => [option.value, option.textContent]), [["disabled", "不保存"], ["best_effort", "尽力保存"], ["required", "必须保存"]]);
+assert.equal(channelForm.elements.media_retention.value, "disabled", "the native channel form defaults to no automatic saving");
 for (const type of ["openai", "anthropic", "newapi", "sub2api"]) {
   const option = new FakeElement("option"); option.value = type;
   channelForm.elements.type.append(option);
@@ -758,7 +811,7 @@ for (const type of ["openai", "anthropic", "newapi", "sub2api"]) {
 const noProfile = new FakeElement("option"); noProfile.value = "";
 const customProfile = new FakeElement("option"); customProfile.value = "custom-profile";
 channelForm.elements.profile_id.append(noProfile, customProfile);
-channelForm.reset = () => { channelForm.elements.type.value = "openai"; channelForm.elements.profile_id.value = ""; };
+channelForm.reset = () => { channelForm.elements.type.value = "openai"; channelForm.elements.profile_id.value = ""; channelForm.elements.media_retention.value = "disabled"; };
 channelForm.reset();
 const channelPicker = new ChannelSelect();
 channelDocument.elements.set("channel-protocol-picker", channelPicker);
@@ -796,11 +849,12 @@ for (const type of ["newapi", "sub2api"]) {
   assert.equal(channelPicker.options.some(option => option.value === `builtin:${type}`), false);
 }
 channelBindings = [{model_pattern:"*",precedence:0,profile_id:"custom-profile",profile_revision:2}];
-vm.runInContext(`openChannelDialog({id:"custom",type:"newapi",enabled:true})`, channelContext);
+vm.runInContext(`openChannelDialog({id:"custom",type:"newapi",enabled:true,media_retention:"required"})`, channelContext);
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(channelPicker.value, "profile:custom-profile", "async binding restoration must still select the custom profile");
 assert.equal(channelForm.elements.profile_id.value, "custom-profile");
 assert.equal(channelForm.elements.type.value, "newapi", "restoring a profile must retain the credential adapter");
+assert.equal(channelForm.elements.media_retention.value, "required", "binding restoration must retain the channel's media setting");
 
 // Discovery remains complete while availability and user selection stay separate.
 const selectedChannel = {
@@ -821,6 +875,14 @@ assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels({selected_m
 assert.deepEqual(JSON.parse(runChannel(`JSON.stringify(channelModels(${JSON.stringify({ ...selectedChannel, selected_models: ["PROVIDER-A"] })}))`)), ["PROVIDER-A", "friendly"], "alias target matching agrees with case-insensitive backend model matching");
 
 runChannel("bindChannelForm()");
+runChannel("openChannelDialog()");
+assert.equal(channelForm.elements.media_retention.value, "disabled", "a new channel must not inherit the previous channel's saving setting");
+for (const retention of ["disabled", "best_effort", "required"]) {
+  runChannel(`openChannelDialog({id:'retention-edit',type:'openai',media_retention:${JSON.stringify(retention)}})`);
+  assert.equal(channelForm.elements.media_retention.value, retention, "editing restores the stored retention value");
+}
+runChannel("openChannelDialog({id:'pre-migration',type:'openai'})");
+assert.equal(channelForm.elements.media_retention.value, "disabled", "old channel responses without retention default to disabled");
 runChannel("openChannelDialog()");
 const fetchButton = channelDocument.getElementById("fetch-channel-models");
 channelFetchImpl = async () => response(200, { status: "ok", models: ["provider-a", "provider-b"], count: 2 });
@@ -934,6 +996,33 @@ assert.deepEqual(submittedChannels.at(-1).selected_models, [], "save must distin
 runChannel(`openChannelDialog(${JSON.stringify({ id: "saved", type: "openai", base_url: "https://api.example/v1", ...selectedChannel })})`);
 for (const handler of channelForm.listeners.get("submit") || []) await handler({ preventDefault() {}, currentTarget: channelForm });
 assert.deepEqual(submittedChannels.at(-1).selected_models, ["provider-a"], "saving persists precisely the selected upstream names");
+assert.equal(submittedChannels.at(-1).media_retention, "disabled", "saving an unchanged old channel submits the disabled default as a string");
+
+const submittedBindings = [];
+channelFetchImpl = async (url, options) => {
+  if (url === "/api/channels" && options?.method === "POST") {
+    submittedChannels.push(JSON.parse(options.body));
+    return response(200, { channel: { id: "retention-saved" } });
+  }
+  if (url.endsWith("/bind-profile")) {
+    submittedBindings.push(JSON.parse(options.body));
+    return response(200, { bindings: [] });
+  }
+  return response(200, { channels: [], data: [] });
+};
+for (const retention of ["disabled", "best_effort", "required"]) {
+  runChannel("openChannelDialog()");
+  channelForm.elements.media_retention.value = retention;
+  channelForm.elements.profile_id.value = "custom-profile";
+  channelForm.elements.fetch_models.checked = false;
+  for (const handler of channelForm.listeners.get("submit") || []) await handler({ preventDefault() {}, currentTarget: channelForm });
+  const payload = submittedChannels.at(-1);
+  assert.equal(payload.media_retention, retention, "FormData must preserve the selected channel retention string");
+  assert.equal(Object.hasOwn(payload, "profile_id"), false, "channel retention is separate from the Profile binding payload");
+  assert.deepEqual(submittedBindings.at(-1), { profile_id: "custom-profile", profile_revision: 2 }, "retention must not become a Profile binding field");
+  runChannel(`openChannelDialog(${JSON.stringify({ ...payload, id: "retention-saved" })})`);
+  assert.equal(channelForm.elements.media_retention.value, retention, "reopening the saved channel retains the selected value");
+}
 
 async function setupHarness(status, statusFailure = false) {
   const setupDocument = new FakeDocument();

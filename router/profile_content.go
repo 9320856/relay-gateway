@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +39,12 @@ func profileTaskContent(c *gin.Context, taskID string) (bool, error) {
 	if run.Engine != "profile" || !strings.EqualFold(strings.TrimSpace(run.TaskKind), asyncTaskKindVideo) {
 		return false, nil
 	}
+	// Materialized media belongs to the task, independently of the Profile
+	// catalog. Serve it before loading a revision that may have been deleted
+	// after completion; this also avoids compiling a Profile on local reads.
+	if served, serveErr := serveProfileManagedVideo(c, run); served || serveErr != nil {
+		return true, serveErr
+	}
 	// Load and compile the immutable revision once. The previous implementation
 	// resolved the operation through profileOperationForRun and then loaded the
 	// same revision again before FetchContent, which doubled database work on
@@ -53,23 +58,27 @@ func profileTaskContent(c *gin.Context, taskID string) (bool, error) {
 	if !ok || op.Content == nil {
 		return true, fmt.Errorf("profile operation %q has no content definition", run.Operation)
 	}
+	op, err = taskMediaOperation(c.Request.Context(), run, op)
+	if err != nil {
+		return true, err
+	}
 
 	// Required-retention tasks must be served from a gateway-managed object once
 	// materialized. Never fall back to a provider URL while the asset is pending
 	// or failed, otherwise a temporary signed URL could escape the retention
 	// contract. Best-effort/disabled profiles may use the declared provider
 	// content endpoint below.
-	if served, serveErr := serveProfileManagedVideo(c, run); served || serveErr != nil {
-		return true, serveErr
-	}
 	if op.EffectiveMediaRetention() == protocol.MediaRetentionRequired {
 		// A provider may report a completed video without a URL and expose the
 		// bytes only through this authenticated Content operation. Ensure a
 		// durable media job exists before returning the normal materializing
 		// response so a direct content request can recover tasks created before
 		// the background poller observed completion.
-		if _, enqueueErr := ensureProfileTaskContentMedia(c.Request.Context(), run.ID, asyncTaskKindVideo); enqueueErr != nil {
-			return true, enqueueErr
+		providerSucceeded := profileRunProviderSucceeded(run, op, asyncTaskKindVideo)
+		if providerSucceeded {
+			if _, enqueueErr := ensureProfileTaskContentMedia(c.Request.Context(), run.ID, asyncTaskKindVideo); enqueueErr != nil {
+				return true, enqueueErr
+			}
 		}
 		return true, &adapter.UpstreamHTTPError{StatusCode: http.StatusNotFound, Body: `{"error":"video media is still materializing"}`}
 	}
@@ -262,19 +271,11 @@ func serveProfileManagedVideo(c *gin.Context, run *db.TaskRun) (bool, error) {
 	return false, nil
 }
 
-// profileContentProfile loads the immutable revision captured by the task.
-// It is kept separate from the status helper so content never dispatches a
-// newly-published revision by accident.
+// profileContentProfile compiles the task's captured definition, including its
+// archived snapshot after catalog deletion. Content and status share this path
+// so neither can substitute a newly-published revision or lose retention policy.
 func profileContentProfile(ctx context.Context, run *db.TaskRun) (protocol.CompiledProfile, error) {
-	revision, err := db.GetProtocolProfileRevisionContext(ctx, run.ProfileID, run.ProfileRevision)
-	if err != nil {
-		return protocol.CompiledProfile{}, err
-	}
-	var source protocol.Profile
-	if err := json.Unmarshal([]byte(revision.ContentJSON), &source); err != nil {
-		return protocol.CompiledProfile{}, err
-	}
-	return protocol.Compile(source)
+	return db.LoadTaskProfileContext(ctx, run)
 }
 
 var safeVideoContentTypes = map[string]struct{}{

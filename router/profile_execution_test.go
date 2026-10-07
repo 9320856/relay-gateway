@@ -140,7 +140,7 @@ func TestProfileClientPollRequiredMediaWaitsForLocalAsset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.TaskStatus != model.VideoStatusProcessing || loaded.TaskOutcome != "pending" || loaded.PollCount != 1 || loaded.PollSuccessCount != 1 || loaded.PollFailureCount != 0 {
+	if loaded.TaskStatus != "materializing" || loaded.TaskOutcome != "pending" || loaded.PollCount != 1 || loaded.PollSuccessCount != 1 || loaded.PollFailureCount != 0 {
 		t.Fatalf("required media client lifecycle = %+v", loaded)
 	}
 	if pollCalls != 1 {
@@ -349,7 +349,7 @@ func TestProfileGatewayWaitMediaFailureRemainsRetryable(t *testing.T) {
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	channel := &db.ChannelModel{ID: "gateway-wait-media-channel", Name: "Gateway Wait Media", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "gateway-wait-model"}
+	channel := &db.ChannelModel{ID: "gateway-wait-media-channel", Name: "Gateway Wait Media", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "key", Enabled: true, ModelsRaw: "gateway-wait-model", MediaRetention: protocol.MediaRetentionRequired}
 	if err := db.SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestProfileEngineVideoCreateCapturesRevisionAndTaskMapping(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "profile-provider-task", "status": "completed", "video_url": "https://cdn.example/submit-result.mp4"})
 	}))
 	t.Cleanup(upstream.Close)
-	channel := &db.ChannelModel{ID: "profile-exec-channel", Name: "profile-exec-channel", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "profile-key", Enabled: true, Priority: 1, Weight: 1, ModelsRaw: "profile-video-model"}
+	channel := &db.ChannelModel{ID: "profile-exec-channel", Name: "profile-exec-channel", Type: "newapi", BaseURL: upstream.URL + "/v1", APIKey: "profile-key", Enabled: true, Priority: 1, Weight: 1, ModelsRaw: "profile-video-model", MediaRetention: protocol.MediaRetentionBestEffort}
 	if err := db.SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +701,7 @@ func TestProfileVideoContentUsesCapturedProfileWithoutLegacyAdapter(t *testing.T
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	channel := &db.ChannelModel{ID: "profile-content-channel", Name: "Profile Content", Type: "openai", BaseURL: upstream.URL + "/v1", APIKey: "profile-key", Enabled: true, Priority: 1, Weight: 1, ModelsRaw: "profile-content-model"}
+	channel := &db.ChannelModel{ID: "profile-content-channel", Name: "Profile Content", Type: "openai", BaseURL: upstream.URL + "/v1", APIKey: "profile-key", Enabled: true, Priority: 1, Weight: 1, ModelsRaw: "profile-content-model", MediaRetention: protocol.MediaRetentionBestEffort}
 	if err := db.SaveChannelModel(channel); err != nil {
 		t.Fatal(err)
 	}

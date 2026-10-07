@@ -172,10 +172,10 @@ func TestAuthenticationLookupsCancelBeforeConnectionAdmission(t *testing.T) {
 			}
 			return nil
 		}},
-		{"CSRF rotation", func(ctx context.Context) error {
+		{"CSRF retrieval", func(ctx context.Context) error {
 			_, err := CSRFTokenContext(ctx, "candidate-session")
 			if !errors.Is(err, context.DeadlineExceeded) {
-				return fmt.Errorf("canceled CSRF rotation returned %v", err)
+				return fmt.Errorf("canceled CSRF retrieval returned %v", err)
 			}
 			return nil
 		}},

@@ -139,7 +139,7 @@ func InspectDatabase(ctx context.Context, path string) (DatabaseIntegrityReport,
 	}
 	report.SchemaVersion = marker.Value
 	if !supportedSchemaVersion(marker.Value) {
-		return report, fmt.Errorf("%w: found version %q, supported versions are %q, %q and %q", ErrIncompatibleSchema, marker.Value, previousSchemaVersion, "3", SchemaVersion)
+		return report, fmt.Errorf("%w: found version %q, supported versions are %s", ErrIncompatibleSchema, marker.Value, strings.Join(supportedSchemaVersions(), ", "))
 	}
 	return report, nil
 }

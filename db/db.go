@@ -23,6 +23,7 @@ import (
 	"gorm.io/gorm/logger"
 
 	"relay-gateway/config"
+	"relay-gateway/media"
 )
 
 // txContextKey carries a request-scoped transaction to persistence helpers.
@@ -74,7 +75,7 @@ func SQLDBForContext(ctx context.Context) *gorm.DB {
 	return conn.WithContext(ctx)
 }
 
-const SchemaVersion = "4"
+const SchemaVersion = "6"
 
 const previousSchemaVersion = "2"
 
@@ -104,8 +105,11 @@ var ErrDBEncryptionKeyRequired = errors.New("RELAY_DB_ENCRYPTION_KEY is required
 var (
 	DB                  *gorm.DB
 	activeChannelsCache atomic.Pointer[[]config.UpstreamChannel]
-	videoTaskCache      = newTaskMappingCache(10000, videoTaskCacheTTL)
-	OnChannelSaved      func(channelID string)
+	// Only refreshers serialize; requests read the published snapshot through
+	// the atomic pointer without acquiring this mutex.
+	activeChannelsRefreshMu sync.Mutex
+	videoTaskCache          = newTaskMappingCache(10000, videoTaskCacheTTL)
+	OnChannelSaved          func(channelID string)
 	// BeforeClose lets background services finish database work before the
 	// shared connection is cleared and closed. It must return before Close can
 	// proceed.
@@ -133,6 +137,7 @@ type ChannelModel struct {
 	Priority          int       `gorm:"not null;default:1;index" json:"priority"`
 	Weight            int       `gorm:"not null;default:1" json:"weight"`
 	FetchModels       bool      `gorm:"not null" json:"fetch_models"`
+	MediaRetention    string    `gorm:"size:16;not null;default:'disabled'" json:"media_retention"`
 	AnthropicVersion  string    `gorm:"size:32;default:'2023-06-01'" json:"anthropic_version"`
 	ModelsRaw         string    `gorm:"type:text" json:"models_raw"`
 	SelectedModelsRaw string    `gorm:"type:text" json:"-"`
@@ -431,7 +436,7 @@ func InitDB(dbPath string) (err error) {
 }
 
 func schemaModels() []any {
-	return []any{&SchemaMeta{}, &ChannelModel{}, &ChannelKeyModel{}, &ModelMappingModel{}, &SettingModel{}, &AdminUserModel{}, &AdminSessionModel{}, &GatewayTokenModel{}, &VideoTaskMapping{}, &RequestLogModel{}, &RequestEventModel{}, &ProtocolProfile{}, &ProtocolProfileRevision{}, &ChannelProtocolBinding{}, &TaskRun{}, &TaskAlias{}, &TaskAttempt{}, &TaskEvent{}, &MediaAsset{}, &MediaObject{}, &MediaMaterializationJob{}, &MediaDeletionJob{}}
+	return []any{&SchemaMeta{}, &ChannelModel{}, &ChannelKeyModel{}, &ModelMappingModel{}, &SettingModel{}, &AdminUserModel{}, &AdminSessionModel{}, &GatewayTokenModel{}, &VideoTaskMapping{}, &RequestLogModel{}, &RequestEventModel{}, &ProtocolProfile{}, &ProtocolProfileRevision{}, &ProtocolProfileSnapshot{}, &ChannelProtocolBinding{}, &TaskRun{}, &TaskAlias{}, &TaskAttempt{}, &TaskEvent{}, &MediaAsset{}, &MediaObject{}, &MediaMaterializationJob{}, &MediaDeletionJob{}}
 }
 
 // migrateSchema applies only explicitly supported upgrades. Each migration is
@@ -454,13 +459,21 @@ func migrateSchema(conn *gorm.DB, models []any) error {
 	if !supportedSchemaVersion(meta.Value) {
 		return fmt.Errorf("%w: found version %q, need %q; back up and migrate the database before starting this version", ErrIncompatibleSchema, meta.Value, SchemaVersion)
 	}
-	if err := conn.AutoMigrate(models...); err != nil {
-		return fmt.Errorf("migrate schema %s to %s: %w", meta.Value, SchemaVersion, err)
-	}
-	if err := conn.Model(&SchemaMeta{}).Where("key = ?", "schema_version").Update("value", SchemaVersion).Error; err != nil {
-		return fmt.Errorf("record schema version %s: %w", SchemaVersion, err)
-	}
-	return nil
+	return conn.Transaction(func(tx *gorm.DB) error {
+		if err := tx.AutoMigrate(models...); err != nil {
+			return fmt.Errorf("migrate schema %s to %s: %w", meta.Value, SchemaVersion, err)
+		}
+		// Only the first upgrade to channel-owned retention initializes existing
+		// channels. Tasks keep their blank policy so their original Profile
+		// snapshots continue deciding retention for historical work.
+		if err := tx.Model(&ChannelModel{}).Where("1 = 1").UpdateColumn("media_retention", media.RetentionDisabled).Error; err != nil {
+			return fmt.Errorf("initialize channel media retention: %w", err)
+		}
+		if err := tx.Model(&SchemaMeta{}).Where("key = ?", "schema_version").Update("value", SchemaVersion).Error; err != nil {
+			return fmt.Errorf("record schema version %s: %w", SchemaVersion, err)
+		}
+		return nil
+	})
 }
 
 func validateSchema(conn *gorm.DB) error {
@@ -489,7 +502,16 @@ func validateSchema(conn *gorm.DB) error {
 }
 
 func supportedSchemaVersion(version string) bool {
-	return version == SchemaVersion || version == previousSchemaVersion || version == "3"
+	for _, supported := range supportedSchemaVersions() {
+		if version == supported {
+			return true
+		}
+	}
+	return false
+}
+
+func supportedSchemaVersions() []string {
+	return []string{previousSchemaVersion, "3", "4", "5", SchemaVersion}
 }
 
 func parseList(raw string) []string {
@@ -761,13 +783,13 @@ func hydrateChannelKeys(cm *ChannelModel) {
 	hydrateChannelKeysOn(DB, cm)
 }
 
-func hydrateChannelKeysOn(conn *gorm.DB, cm *ChannelModel) {
+func hydrateChannelKeysOn(conn *gorm.DB, cm *ChannelModel) error {
 	if conn == nil || cm == nil || cm.ID == "" {
-		return
+		return nil
 	}
 	var keys []ChannelKeyModel
-	if conn.Where("channel_id = ?", cm.ID).Order("position asc").Find(&keys).Error != nil {
-		return
+	if err := conn.Where("channel_id = ?", cm.ID).Order("position asc").Find(&keys).Error; err != nil {
+		return err
 	}
 	cm.APIKeys = make([]string, 0, len(keys))
 	cm.APIKeyLoadError = ""
@@ -783,7 +805,10 @@ func hydrateChannelKeysOn(conn *gorm.DB, cm *ChannelModel) {
 		cm.APIKey = cm.APIKeys[0]
 	}
 	var mappings []ModelMappingModel
-	if conn.Where("channel_id = ?", cm.ID).Order("source_model asc").Find(&mappings).Error == nil && len(mappings) > 0 {
+	if err := conn.Where("channel_id = ?", cm.ID).Order("source_model asc").Find(&mappings).Error; err != nil {
+		return err
+	}
+	if len(mappings) > 0 {
 		modelMap := make(map[string]string, len(mappings))
 		for _, mapping := range mappings {
 			if strings.TrimSpace(mapping.SourceModel) != "" && strings.TrimSpace(mapping.TargetModel) != "" {
@@ -794,12 +819,20 @@ func hydrateChannelKeysOn(conn *gorm.DB, cm *ChannelModel) {
 			cm.ModelMapRaw = string(encoded)
 		}
 	}
+	return nil
 }
 
 func (m *ChannelModel) ToUpstreamChannel() config.UpstreamChannel {
 	if len(m.APIKeys) == 0 {
 		hydrateChannelKeys(m)
 	}
+	return m.toUpstreamChannel()
+}
+
+// toUpstreamChannel converts an already hydrated model without querying SQL.
+// A channel with no credentials is a complete result too; using the public
+// fallback while a read transaction owns the sole connection would deadlock.
+func (m *ChannelModel) toUpstreamChannel() config.UpstreamChannel {
 	modelMap := make(map[string]string)
 	if m.ModelMapRaw != "" {
 		_ = json.Unmarshal([]byte(m.ModelMapRaw), &modelMap)
@@ -820,26 +853,52 @@ func (m *ChannelModel) ToUpstreamChannel() config.UpstreamChannel {
 		// A malformed stored whitelist must not restore unrestricted routing.
 		selectedModels = []string{}
 	}
-	return config.UpstreamChannel{ID: m.ID, Type: m.Type, BaseURL: m.BaseURL, APIKey: m.APIKey, APIKeys: append([]string(nil), m.APIKeys...), Enabled: m.Enabled, Priority: priority, Weight: weight, FetchModels: m.FetchModels, AnthropicVersion: m.AnthropicVersion, Headers: headers, Models: parseList(m.ModelsRaw), SelectedModels: selectedModels, ModelMap: modelMap}
+	return config.UpstreamChannel{ID: m.ID, Type: m.Type, BaseURL: m.BaseURL, APIKey: m.APIKey, APIKeys: append([]string(nil), m.APIKeys...), Enabled: m.Enabled, Priority: priority, Weight: weight, FetchModels: m.FetchModels, MediaRetention: m.MediaRetention, AnthropicVersion: m.AnthropicVersion, Headers: headers, Models: parseList(m.ModelsRaw), SelectedModels: selectedModels, ModelMap: modelMap}
 }
 
 func RefreshActiveChannelsCache() {
+	// Keep loading and publication in the same order. Locking only Store would
+	// allow a delayed refresher to overwrite a newer committed configuration.
+	// Callers refresh after committing, so this never holds the SQL connection
+	// while waiting for another refresher.
+	activeChannelsRefreshMu.Lock()
+	defer activeChannelsRefreshMu.Unlock()
 	if DB == nil {
 		return
 	}
-	var cms []ChannelModel
-	if err := DB.Where("enabled = ?", true).Order("priority asc, weight desc, created_at asc").Find(&cms).Error; err != nil {
+	res, err := loadActiveChannelsSnapshot(DB)
+	if err != nil {
 		return
+	}
+	activeChannelsCache.Store(&res)
+}
+
+func loadActiveChannelsSnapshot(conn *gorm.DB) ([]config.UpstreamChannel, error) {
+	var cms []ChannelModel
+	// Rows, credentials, and model mappings must come from one committed read
+	// snapshot. Refresh ordering alone cannot prevent a save from committing
+	// between the channel query and its credential/mapping queries.
+	if err := conn.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("enabled = ?", true).Order("priority asc, weight desc, created_at asc").Find(&cms).Error; err != nil {
+			return err
+		}
+		for i := range cms {
+			if err := hydrateChannelKeysOn(tx, &cms[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	res := make([]config.UpstreamChannel, 0, len(cms))
 	for i := range cms {
-		hydrateChannelKeys(&cms[i])
 		if cms[i].APIKeyLoadError != "" {
 			continue
 		}
-		res = append(res, cms[i].ToUpstreamChannel())
+		res = append(res, cms[i].toUpstreamChannel())
 	}
-	activeChannelsCache.Store(&res)
+	return res, nil
 }
 
 // NotifyChannelsChanged refreshes in-memory routing state after a committed
@@ -1026,6 +1085,11 @@ func SaveChannelModelContext(ctx context.Context, cm *ChannelModel) error {
 	cm.BaseURL = strings.TrimSpace(cm.BaseURL)
 	if cm.ID == "" || cm.BaseURL == "" {
 		return errors.New("channel id and base URL are required")
+	}
+	if retention, err := media.NormalizeRetention(cm.MediaRetention); err != nil {
+		return err
+	} else {
+		cm.MediaRetention = retention
 	}
 	// The DB package deliberately does not import adapter (adapter implementations
 	// depend on audit/db), so keep persistence validation decoupled from the

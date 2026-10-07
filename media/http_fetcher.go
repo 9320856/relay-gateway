@@ -26,8 +26,11 @@ type HTTPSourceFetcher struct {
 	AllowedContentType map[string]struct{}
 	URLValidator       func(string) error
 	TrustedFakeIPHosts map[string]struct{}
-	Resolver           IPResolver
-	DialContext        func(context.Context, string, string) (net.Conn, error)
+	// Upstream response media and its CDN redirects may use any valid DNS
+	// hostname in Fake-IP networks. Each hop still validates and pins its IPs.
+	AllowUpstreamFakeIP bool
+	Resolver            IPResolver
+	DialContext         func(context.Context, string, string) (net.Conn, error)
 }
 
 // IPResolver is the DNS surface used by the media fetcher's validation and
@@ -164,7 +167,7 @@ func (f HTTPSourceFetcher) Fetch(ctx context.Context, result MediaResult) (Fetch
 		if err != nil {
 			return fmt.Errorf("unsafe media redirect: %w", err)
 		}
-		if initial, ok := req.Context().Value(mediaInitialTargetKey{}).(mediaTarget); ok && initial.fakeIP && redirectTarget.fakeIP && redirectTarget.host != initial.host {
+		if initial, ok := req.Context().Value(mediaInitialTargetKey{}).(mediaTarget); ok && !f.AllowUpstreamFakeIP && initial.fakeIP && redirectTarget.fakeIP && redirectTarget.host != initial.host {
 			return fmt.Errorf("unsafe media redirect: Fake-IP host changed")
 		}
 		*req = *req.WithContext(context.WithValue(req.Context(), mediaTargetHostKey{}, redirectTarget))
@@ -181,9 +184,9 @@ func (f HTTPSourceFetcher) Fetch(ctx context.Context, result MediaResult) (Fetch
 	if err != nil {
 		return FetchedSource{}, fmt.Errorf("fetch media URL: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(resp.Header.Get("Content-Range")) != "" {
 		resp.Body.Close()
-		return FetchedSource{}, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		return FetchedSource{}, fmt.Errorf("upstream media requires a complete response, received status %d", resp.StatusCode)
 	}
 	if resp.ContentLength > max {
 		resp.Body.Close()
@@ -326,6 +329,10 @@ func (f HTTPSourceFetcher) validateURL(ctx context.Context, raw string) (mediaTa
 func (f HTTPSourceFetcher) isTrustedFakeIPHost(host string) bool {
 	if net.ParseIP(host) != nil {
 		return false
+	}
+	if f.AllowUpstreamFakeIP {
+		_, ok := configuredPublicMediaHost(host)
+		return ok
 	}
 	for candidate := range f.TrustedFakeIPHosts {
 		normalized, err := normalizeMediaHostname(candidate)

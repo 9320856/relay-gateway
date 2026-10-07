@@ -6,10 +6,9 @@ import (
 	"testing"
 )
 
-func TestNewHTTPSourceFetcherTrustConfiguration(t *testing.T) {
+func TestNewHTTPSourceFetcherWithoutUpstreamRequiresExactConfiguration(t *testing.T) {
 	const sourceHost = "cdn.example.net"
 	const sourceURL = "https://cdn.example.net/image.png"
-	const baseURL = "https://api.example.org/v1"
 	tests := []struct {
 		name       string
 		configured string
@@ -33,7 +32,7 @@ func TestNewHTTPSourceFetcherTrustConfiguration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS", tc.configured)
-			fetcher := NewHTTPSourceFetcher(sourceURL, baseURL)
+			fetcher := NewHTTPSourceFetcher(sourceURL, "")
 			_, trusted := fetcher.TrustedFakeIPHosts[sourceHost]
 			if trusted != tc.wantTrust || (trusted && len(fetcher.TrustedFakeIPHosts) != 1) {
 				t.Fatalf("trusted hosts=%v, want trust=%v", fetcher.TrustedFakeIPHosts, tc.wantTrust)
@@ -47,18 +46,26 @@ func TestNewHTTPSourceFetcherTrustConfiguration(t *testing.T) {
 	}
 }
 
-func TestNewHTTPSourceFetcherPreservesSameSiteTrust(t *testing.T) {
+func TestNewHTTPSourceFetcherSupportsFutureUpstreamsAndCDNs(t *testing.T) {
 	t.Setenv("RELAY_MEDIA_TRUSTED_FAKE_IP_HOSTS", "unrelated.example.com")
-	fetcher := NewHTTPSourceFetcher("https://CDN.example.com./image.png", "https://api.example.com/v1")
-	if _, ok := fetcher.TrustedFakeIPHosts["cdn.example.com"]; !ok || len(fetcher.TrustedFakeIPHosts) != 1 {
-		t.Fatalf("trusted hosts=%v", fetcher.TrustedFakeIPHosts)
+	for _, base := range []string{"https://api.example.com/v1", "https://new-relay.example.org/v1", "http://127.0.0.1:8001/v1"} {
+		for _, host := range []string{"cdn.example.com", "different-cdn.example.net", "download.xmimage2.cc.cd", "user.github.io", "github.io", "r2.dev", "xn--bcher-kva.example.org"} {
+			fetcher := NewHTTPSourceFetcher("https://"+host+"/image.png", base)
+			if !fetcher.AllowUpstreamFakeIP {
+				t.Fatalf("upstream %q media %q requires a manual domain list", base, host)
+			}
+			fetcher.Resolver = staticResolver(map[string][]string{host: {"198.18.0.97", "2001:2::60"}})
+			if target, err := fetcher.validateURL(context.Background(), "https://"+host+"/image.png"); err != nil || !target.fakeIP {
+				t.Fatalf("upstream %q media %q was blocked: target=%+v err=%v", base, host, target, err)
+			}
+		}
 	}
 }
 
 func TestConfiguredPublicMediaHostRejectsMalformedAndNonPublicEntries(t *testing.T) {
 	for _, entry := range []string{
 		"", "localhost", "metadata.google.internal", "127.0.0.1", "::1", "198.18.0.160",
-		"com", "co.uk", "service.local", "service.home.arpa", "test.invalid", "user.github.io",
+		"com", "service.local", "service.home.arpa", "test.invalid",
 		"*.example.com", "https://example.com", "example.com:443", "user@example.com",
 		"example.com/path", "example.com?query", "example.com#fragment",
 		"a..example.com", "-a.example.com", "a-.example.com", "a_b.example.com",

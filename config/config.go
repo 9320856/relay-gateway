@@ -22,8 +22,9 @@ type UpstreamChannel struct {
 	Priority         int               `yaml:"priority"`           // 优先级，数字越小越优先 (1 为主用，2 为备用)
 	Weight           int               `yaml:"weight"`             // 负载均衡权重
 	FetchModels      bool              `yaml:"fetch_models"`       // 自动向上游 /models 拉取可用模型列表
-	AnthropicVersion string            `yaml:"anthropic_version"`  // Anthropic 协议版本头，默认 2023-06-01
-	Headers          map[string]string `yaml:"headers"`            // 自定义附加请求头
+	MediaRetention   string            `yaml:"media_retention"`
+	AnthropicVersion string            `yaml:"anthropic_version"` // Anthropic 协议版本头，默认 2023-06-01
+	Headers          map[string]string `yaml:"headers"`           // 自定义附加请求头
 	Models           []string          `yaml:"models"`
 	SelectedModels   []string          `yaml:"selected_models,omitempty"` // nil preserves legacy routing; an empty selection disables new model calls
 	ModelMap         map[string]string `yaml:"model_map"`                 // mapping from incoming model to upstream model

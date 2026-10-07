@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func TestAuthSetupRemoteAndCredentialIsolation(t *testing.T) {
 	}
 }
 
-func TestAuthCSRFRotationGatewayRotationAndLogout(t *testing.T) {
+func TestAuthStableCSRFGatewayRotationAndLogout(t *testing.T) {
 	initAuthTestDB(t)
 	engine := Setup()
 
@@ -142,8 +143,8 @@ func TestAuthCSRFRotationGatewayRotationAndLogout(t *testing.T) {
 	_ = json.Unmarshal(setup.Body.Bytes(), &setupPayload)
 	cookie := setup.Result().Cookies()[0]
 
-	// /api/auth/me rotates the CSRF token.  The old one must stop working,
-	// while the newly returned token remains valid for the current session.
+	// Loading another console page must not invalidate the token held by the
+	// first page, including the original token returned by setup/login.
 	me := httptest.NewRecorder()
 	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	meReq.AddCookie(cookie)
@@ -157,6 +158,45 @@ func TestAuthCSRFRotationGatewayRotationAndLogout(t *testing.T) {
 	if err := json.Unmarshal(me.Body.Bytes(), &mePayload); err != nil || mePayload.CSRF == "" {
 		t.Fatalf("auth/me did not return a CSRF token: %s", me.Body.String())
 	}
+	if mePayload.CSRF != setupPayload.CSRF {
+		t.Fatal("loading another console page changed the session CSRF token")
+	}
+
+	// Concurrent page loads and writes reuse the same cookie. The first tab
+	// keeps its cached setup token while the other tabs retrieve theirs.
+	start := make(chan struct{})
+	var tabs sync.WaitGroup
+	for tab := 0; tab < 24; tab++ {
+		tabs.Add(1)
+		go func() {
+			defer tabs.Done()
+			<-start
+			for refresh := 0; refresh < 3; refresh++ {
+				response := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+				req.AddCookie(cookie)
+				engine.ServeHTTP(response, req)
+				var identity struct {
+					CSRF string `json:"csrf_token"`
+				}
+				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &identity) != nil || identity.CSRF != setupPayload.CSRF {
+					t.Errorf("parallel page load invalidated CSRF: %d %s", response.Code, response.Body.String())
+					return
+				}
+				write := httptest.NewRecorder()
+				writeReq := httptest.NewRequest(http.MethodPost, "/api/gateway-token/rotate", nil)
+				writeReq.AddCookie(cookie)
+				writeReq.Header.Set("X-CSRF-Token", setupPayload.CSRF)
+				engine.ServeHTTP(write, writeReq)
+				if write.Code != http.StatusOK {
+					t.Errorf("first tab's cached CSRF token failed during other page loads: %d %s", write.Code, write.Body.String())
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	tabs.Wait()
 
 	rotate := func(csrf, key string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -178,8 +218,8 @@ func TestAuthCSRFRotationGatewayRotationAndLogout(t *testing.T) {
 		t.Fatalf("invalid CSRF accepted with status %d", got.Code)
 	}
 
-	if got := rotate(setupPayload.CSRF, ""); got.Code != http.StatusForbidden {
-		t.Fatalf("CSRF token returned by setup remained valid after /me rotation: %d", got.Code)
+	if got := rotate(setupPayload.CSRF, ""); got.Code != http.StatusOK {
+		t.Fatalf("first tab's setup token failed after other pages loaded: %d %s", got.Code, got.Body.String())
 	}
 	rotated := rotate(mePayload.CSRF, "")
 	if rotated.Code != http.StatusOK {
