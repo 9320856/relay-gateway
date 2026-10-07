@@ -41,7 +41,7 @@ func TestProfileImageResponseKeepsTaskEnvelopeAndRawPayload(t *testing.T) {
 	}
 }
 
-func TestMaterializeProfileImageResponseAddsManagedDataWhenMissing(t *testing.T) {
+func TestRetainProfileImageResponseRewritesGeneratedDataAndRawPayload(t *testing.T) {
 	t.Setenv("RELAY_DB_ENCRYPTION_KEY", "profile-image-managed-data-test-key")
 	if err := db.InitDB(t.TempDir() + "/managed-image.db"); err != nil {
 		t.Fatal(err)
@@ -61,20 +61,31 @@ func TestMaterializeProfileImageResponseAddsManagedDataWhenMissing(t *testing.T)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "http://gateway.example/v1/images", nil)
 	source := "data:image/png;base64,iVBORw0KGgo="
-	response := map[string]any{"raw": map[string]any{"url": source}}
-	if err := materializeProfileImageResponse(c, run.ID, "", response, []string{source}); err != nil {
+	raw := map[string]any{"url": source, "id": source}
+	response := profileImageResponse(protocol.Result{JSON: raw, ResultURLs: []string{source}}, false)
+	if err := retainMediaResponse(c, run.ID, "image", "", relaymedia.RetentionRequired, response, []string{source}); err != nil {
 		t.Fatal(err)
 	}
-	data, ok := response["data"].([]map[string]string)
+	data, ok := response["data"].([]any)
 	if !ok || len(data) != 1 {
 		t.Fatalf("managed image data = %#v", response["data"])
 	}
-	managed, err := url.Parse(data[0]["url"])
-	if err != nil || !strings.HasPrefix(managed.Path, "/v1/media/") || managed.Host != "gateway.example" {
-		t.Fatalf("managed image URL = %q, err=%v", data[0]["url"], err)
+	image, ok := data[0].(map[string]any)
+	managedURL, _ := image["url"].(string)
+	if !ok {
+		t.Fatalf("managed image = %#v", data[0])
 	}
-	if raw := response["raw"].(map[string]any); raw["url"] != data[0]["url"] {
-		t.Fatalf("raw URL = %v, data URL = %s", raw["url"], data[0]["url"])
+	managed, err := url.Parse(managedURL)
+	if err != nil || !strings.HasPrefix(managed.Path, "/v1/media/") || managed.Host != "gateway.example" {
+		t.Fatalf("managed image URL = %q, err=%v", managedURL, err)
+	}
+	for _, key := range []string{"raw", "raw_payload"} {
+		if retained := response[key].(map[string]any); retained["url"] != managedURL || retained["id"] != source {
+			t.Fatalf("retained %s = %#v, want managed URL %q and unchanged identifier", key, retained, managedURL)
+		}
+	}
+	if raw["url"] != source {
+		t.Fatalf("retention mutated the provider result: %#v", raw)
 	}
 }
 

@@ -196,10 +196,6 @@ type StatusQuerier interface {
 	PollOnce(context.Context, CompiledProfile, string, Request) (Result, error)
 }
 
-type ContentFetcher interface {
-	FetchContent(context.Context, CompiledProfile, string, Request) (ContentResult, error)
-}
-
 // HTTPExecutor is the generic JSON/HTTP implementation. It intentionally has
 // no provider-name branches; provider-specific semantics belong in profiles or
 // a narrow policy layer above it.

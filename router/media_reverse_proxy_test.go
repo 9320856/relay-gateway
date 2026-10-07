@@ -46,24 +46,24 @@ func TestMediaURLsThroughHTTPSReverseProxy(t *testing.T) {
 	videoBytes := []byte("proxy video bytes")
 	videoSource := "data:video/mp4;base64," + base64.StdEncoding.EncodeToString(videoBytes)
 	engine := Setup()
-	// Small test-only endpoints call the same materialization helpers as the
+	// Small test-only endpoints call the same retention path as the
 	// generation handlers, without depending on a provider or external fetch.
 	engine.GET("/test/generated-image", func(c *gin.Context) {
 		c.Request = c.Request.WithContext(audit.WithAudit(c.Request.Context(), entry))
 		response := profileImageResponse(protocol.Result{JSON: map[string]any{"data": []any{map[string]any{"url": imageSource}}}, ResultURLs: []string{imageSource}}, false)
-		if err := materializeProfileImageResponse(c, "proxy-image-run", "", response, []string{imageSource}); err != nil {
+		if err := retainMediaResponse(c, "proxy-image-run", "image", "", media.RetentionRequired, response, []string{imageSource}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, response)
 	})
 	engine.GET("/test/generated-video", func(c *gin.Context) {
-		managedURL, err := materializeProfileVideoURL(c, "proxy-video-run", videoSource, "")
-		if err != nil {
+		response := gin.H{"url": videoSource}
+		if err := retainMediaResponse(c, "proxy-video-run", "video", "", media.RetentionRequired, response, []string{videoSource}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"url": managedURL})
+		c.JSON(http.StatusOK, response)
 	})
 	backend := httptest.NewServer(engine)
 	t.Cleanup(backend.Close)

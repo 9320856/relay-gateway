@@ -18,29 +18,6 @@ import (
 	"relay-gateway/task"
 )
 
-// materializeProfileVideoURL provides the first required-media end-to-end
-// path. It is intentionally opt-in and synchronous for gateway_wait results;
-// client/background modes continue to use their durable task state until a
-// queued materialization callback is available.
-func materializeProfileVideoURL(c *gin.Context, taskRunID, sourceURL, baseURL string) (string, error) {
-	return materializeProfileMediaURL(c, taskRunID, "video", 0, sourceURL, baseURL)
-}
-
-// materializeProfileMediaURL synchronously creates one logical asset and
-// atomically stores its provider result. It is used only when a required
-// result must be stable before the HTTP response is sent; async/client and
-// background paths use the durable media worker instead.
-func materializeProfileMediaURL(c *gin.Context, taskRunID, kind string, ordinal int, sourceURL, baseURL string) (string, error) {
-	if ordinal != 0 {
-		return "", errors.New("single profile media source must have ordinal zero")
-	}
-	urls, err := materializeProfileMediaURLs(c, taskRunID, kind, baseURL, []string{sourceURL})
-	if err != nil {
-		return "", err
-	}
-	return urls[0], nil
-}
-
 // Persist the complete result set before any download can complete its task.
 // Claim the first pending asset in that same transaction; later assets may be
 // completed by background workers and are reloaded before a synchronous claim.
@@ -170,44 +147,6 @@ func newProfileMediaSourceFetcher(sourceURL, baseURL string) relaymedia.SourceFe
 	return relaymedia.NewHTTPSourceFetcher(sourceURL, baseURL)
 }
 
-// materializeProfileImageResponse replaces every provider URL in an image
-// response with a gateway capability URL. Raw provider payloads are copied
-// and rewritten too, so the response cannot leak a temporary signed URL in an
-// auxiliary field while data[].url appears stable.
-func materializeProfileImageResponse(c *gin.Context, taskRunID, baseURL string, response map[string]any, sourceURLs []string) error {
-	if response == nil || len(sourceURLs) == 0 {
-		return nil
-	}
-	stableURLs, err := materializeProfileMediaURLs(c, taskRunID, "image", baseURL, sourceURLs)
-	if err != nil {
-		return err
-	}
-	replacements := make(map[string]string, len(sourceURLs))
-	managedData := make([]map[string]string, 0, len(sourceURLs))
-	for ordinal, sourceURL := range sourceURLs {
-		stableURL := stableURLs[ordinal]
-		replacements[sourceURL] = stableURL
-		managedData = append(managedData, map[string]string{"url": stableURL})
-	}
-	if data, ok := response["data"].([]map[string]string); ok {
-		for _, item := range data {
-			if source, exists := item["url"]; exists {
-				if stable, found := replacements[source]; found {
-					item["url"] = stable
-				}
-			}
-		}
-	} else {
-		response["data"] = managedData
-	}
-	for _, key := range []string{"raw", "raw_payload"} {
-		if value, exists := response[key]; exists {
-			response[key] = rewriteProfileMediaValue(value, replacements)
-		}
-	}
-	return nil
-}
-
 func rewriteProfileMediaValue(value any, replacements map[string]string) any {
 	switch typed := value.(type) {
 	case string:
@@ -231,8 +170,6 @@ func rewriteProfileMediaValue(value any, replacements map[string]string) any {
 		return value
 	}
 }
-
-func profileMediaRequired() bool { return false }
 
 func profileMediaRetentionEnabled(op protocol.Operation) bool {
 	return op.EffectiveMediaRetention() != protocol.MediaRetentionDisabled

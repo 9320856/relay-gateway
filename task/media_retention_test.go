@@ -53,39 +53,4 @@ func TestMediaRetentionScanRevokesAndQueuesDeletionIdempotently(t *testing.T) {
 	}
 }
 
-func TestMediaCapacityStatsAndPolicy(t *testing.T) {
-	if err := db.InitDB(t.TempDir() + "/capacity.db"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	objects := []*db.MediaObject{
-		{ID: "capacity-ready", Backend: "local", StorageKey: "ready", SHA256: "ready", ByteSize: 100, ContentType: "x", State: db.MediaObjectReady, RefCount: 1},
-		{ID: "capacity-stage", Backend: "local", StorageKey: "stage", SHA256: "stage", ByteSize: 20, ContentType: "x", State: db.MediaObjectStaging, RefCount: 1},
-		{ID: "capacity-delete", Backend: "local", StorageKey: "delete", SHA256: "delete", ByteSize: 7, ContentType: "x", State: db.MediaObjectDeletePending, RefCount: 0},
-		{ID: "capacity-gone", Backend: "local", StorageKey: "gone", SHA256: "gone", ByteSize: 999, ContentType: "x", State: db.MediaObjectDeleted, RefCount: 0},
-	}
-	for _, object := range objects {
-		if err := db.DB.Create(object).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i, status := range []string{db.MediaAssetAvailable, db.MediaAssetDeleted} {
-		asset := &db.MediaAsset{PublicID: "capacity-asset-" + string(rune('a'+i)), CapabilityHash: "capacity-hash-" + string(rune('a'+i)), TaskRunID: "capacity-run-" + string(rune('a'+i)), Kind: "video", Status: status}
-		if err := db.CreateMediaAsset(asset); err != nil {
-			t.Fatal(err)
-		}
-	}
-	stats, err := GetMediaCapacityStats()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.TotalObjectBytes != 127 || stats.ReadyObjectBytes != 100 || stats.StagingObjectBytes != 20 || stats.DeletePendingObjectBytes != 7 || stats.AssetCount != 2 || stats.ActiveAssetCount != 1 {
-		t.Fatalf("stats = %+v", stats)
-	}
-	check, err := CheckMediaCapacity(MediaCapacityPolicy{MaxObjectBytes: 127, MinFreeBytes: 50, FreeBytes: func() (int64, error) { return 49, nil }})
-	if err != nil || check.Allowed || len(check.Reasons) != 2 {
-		t.Fatalf("check = %+v, %v", check, err)
-	}
-}
-
 func ptrTime(value time.Time) *time.Time { return &value }

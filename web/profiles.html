@@ -5,38 +5,31 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="google" content="notranslate">
   <meta name="description" content="Relay Gateway 协议配置与 Profile 管理">
-  <title>Profile 管理 · Relay Gateway</title>
-  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
-  <script defer src="/assets/app.js?v=concurrency-v8"></script>
+  <title>Profile 协议 · Relay Gateway</title>
+  <link rel="stylesheet" href="/assets/app.css?v=ui-v0.2.4-r1">
+  <script defer src="/assets/app.js?v=ui-v0.2.4-r1"></script>
 </head>
 <body data-page="profiles" translate="no" class="notranslate">
-  <div class="app-shell">
+  <div class="app-shell ui-shell">
     <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
-      <a class="brand" href="/dashboard">
-        <span class="brand-mark">RG</span>
-        <span><strong>Relay Gateway</strong><small>V0.2.3 · 开发测试版</small></span>
-      </a>
+      <a class="brand" href="/dashboard"><span class="brand-mark">RG</span><span class="brand-name">Relay Gateway</span></a>
       <nav aria-label="主导航">
-        <a class="nav-link" href="/dashboard" id="nav-dashboard">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
-          <span>控制台</span>
-        </a>
-        <a class="nav-link active" href="/profiles" id="nav-profiles">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span>Profile 管理</span>
-        </a>
-        <a class="nav-link" href="/media" id="nav-media">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-          <span>媒体管理</span>
-        </a>
-        <a class="nav-link" href="/logs" id="nav-logs">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
-          <span>调用日志</span>
-        </a>
+        <div class="nav-group">
+          <p class="nav-group-label">工作空间</p>
+        <a class="nav-link" href="/dashboard" id="nav-dashboard" data-dashboard-view="overview"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>概览</span></a>
+        <a class="nav-link" href="/dashboard#channels" id="nav-channels" data-dashboard-view="channels"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M12 10v4"/></svg><span>渠道管理</span></a>
+        <a class="nav-link" href="/dashboard#playground" id="nav-playground" data-dashboard-view="playground"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span>模型调试</span></a>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">资源与观测</p>
+        <a class="nav-link active" href="/profiles" id="nav-profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>Profile 协议</span></a>
+        <a class="nav-link" href="/media" id="nav-media"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg><span>媒体资产</span></a>
+        <a class="nav-link" href="/logs" id="nav-logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9l-6-6H8Z"/><path d="M14 3v6h6M7 13h10M7 17h7"/></svg><span>调用日志</span></a>
+        </div>
       </nav>
       <div class="sidebar-foot">
-        <span class="status-dot"></span>
-        <span>协议引擎就绪</span>
+        <a class="nav-link sidebar-settings" href="/dashboard#settings" id="nav-settings" data-dashboard-view="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 3-.6 2.4-2 .8-2.1-.9L2.3 9.6l1.8 1.6v1.6l-1.8 1.6 2.5 4.3 2.1-.9 2 .8.6 2.4h5l.6-2.4 2-.8 2.1.9 2.5-4.3-1.8-1.6v-1.6l1.8-1.6-2.5-4.3-2.1.9-2-.8-.6-2.4h-5Z"/><circle cx="12" cy="12" r="3"/></svg><span>系统设置</span></a>
+        <div class="sidebar-version"><span class="status-dot"></span><span>V0.2.4 · 开发测试版</span></div>
       </div>
     </aside>
 
@@ -48,9 +41,10 @@
           <button class="mobile-nav-toggle icon-button" id="mobile-nav-toggle" type="button" aria-label="切换侧边栏导航">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
-          <div>
-            <p class="eyebrow"><span class="status-dot"></span>PROTOCOL ENGINE</p>
-            <h1>Profile 协议档案管理</h1>
+          <div class="topbar-title-wrap">
+            <span class="workspace-breadcrumb" id="workspace-breadcrumb">资源与观测</span>
+            <h1 id="workspace-title">Profile 协议</h1>
+            <p class="topbar-sub" id="workspace-description">定义上游请求规则，管理版本与渠道绑定。</p>
           </div>
         </div>
         <div class="account">
@@ -66,11 +60,10 @@
       </header>
 
       <section class="panel profile-panel" id="profiles-section">
-        <div class="panel-head">
+        <div class="panel-head profile-toolbar">
           <div>
-            <p class="eyebrow">CONFIGURATION</p>
-            <h2>协议档案与渠道绑定</h2>
-            <p class="panel-subtitle">定义上游协议契约与接口操作规则，在渠道中按需绑定调度。Profile 是调用规则，不是渠道。</p>
+            <h2>协议档案</h2>
+            <p class="panel-subtitle">在这里编辑协议规则、发布版本，并将已发布的版本绑定到渠道。</p>
           </div>
           <button class="button primary" id="add-profile" type="button">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
@@ -91,7 +84,7 @@
 
           <!-- 右侧：Profile 编辑与绑定工作区 -->
           <div class="profile-editor-pane">
-            <div class="empty" id="profile-editor-empty">选择左侧一个 Profile 开始管理 Revision 与协议规则。</div>
+            <div class="empty" id="profile-editor-empty"><div class="empty-icon-box"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg></div><p class="empty-title">选择一个协议档案</p><p class="empty-desc">查看版本、编辑规则或管理渠道绑定。</p></div>
 
             <div id="profile-editor" class="hidden">
               <div class="profile-editor-head">
@@ -125,7 +118,7 @@
               <section class="profile-revision-inspector hidden" id="profile-revision-inspector" aria-live="polite">
                 <div class="inspector-header">
                   <div class="inspector-title">
-                    <span class="inspector-icon">🔍</span>
+                    <span class="inspector-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></span>
                     <strong>Revision 引用与相邻差异</strong>
                   </div>
                   <button class="icon-button compact-btn" type="button" id="close-revision-inspector" aria-label="收起检查器">✕</button>
@@ -138,13 +131,13 @@
               <details class="profile-quick-guide">
                 <summary class="profile-quick-guide-summary">
                   <span class="guide-summary-left">
-                    <span class="guide-icon">💡</span>
-                    <span class="guide-title">Profile 协议规则与生命周期指南</span>
+                    <span class="guide-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg></span>
+                    <span class="guide-title">版本与协议指南</span>
                     <span class="guide-pills">
                       <span class="guide-pill">草稿规则</span>
                       <span class="guide-pill">发布与停用</span>
                       <span class="guide-pill">异步轮询</span>
-                      <span class="guide-pill">媒体托管</span>
+                      <span class="guide-pill">媒体保存</span>
                     </span>
                   </span>
                   <span class="guide-toggle-hint">展开说明 ▾</span>
@@ -152,7 +145,7 @@
                 <div class="profile-guide-content">
                   <div class="guide-card">
                     <div class="guide-card-head">
-                      <span class="guide-card-icon">📌</span>
+                      <span class="guide-card-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg></span>
                       <strong>版本生命周期规则</strong>
                     </div>
                     <ul class="guide-list">
@@ -164,13 +157,13 @@
                   </div>
                   <div class="guide-card">
                     <div class="guide-card-head">
-                      <span class="guide-card-icon">⚡</span>
+                      <span class="guide-card-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M12 10v4"/></svg></span>
                       <strong>接口运行与轮询机制</strong>
                     </div>
                     <ul class="guide-list">
                       <li><strong>多接口聚合</strong>：单一 Profile 内可聚合聊天、生图、生视频等全套能力，分别定义协议端点。</li>
                       <li><strong>异步与轮询</strong>：提交异步任务后返回 Task ID，网关后台按规则轮询提取结果 URL（如 <code>data.0.url</code>）。</li>
-                      <li><strong>媒体托管</strong>：选择“必须托管”后网关自动下载媒体文件到存储池并分发本地安全直链。</li>
+                      <li><strong>媒体保存</strong>：在渠道中选择“不保存”“尽力保存”或“必须保存”，统一控制图片和视频的保存行为。</li>
                       <li><strong>配置分离</strong>：网关服务地址与密钥在渠道中统一配置，Profile 专注于定义接口契约与请求映射。</li>
                     </ul>
                   </div>
@@ -256,33 +249,33 @@
           <div class="profile-capability-chips">
             <label class="profile-capability-chip profile-capability-card active" for="profile-create-chat">
               <input id="profile-create-chat" type="checkbox" checked>
-              <span class="chip-icon">💬</span>
+              <span class="chip-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v9Z"/><path d="M8 8h8M8 12h5"/></svg></span>
               <span class="chip-title">聊天对话</span>
             </label>
 
             <label class="profile-capability-chip profile-capability-card active" for="profile-create-image">
               <input id="profile-create-image" type="checkbox" checked>
-              <span class="chip-icon">🖼️</span>
+              <span class="chip-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></span>
               <span class="chip-title">图片生成</span>
             </label>
 
             <label class="profile-capability-chip profile-capability-card active" for="profile-create-video">
               <input id="profile-create-video" type="checkbox" checked>
-              <span class="chip-icon">🎬</span>
+              <span class="chip-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg></span>
               <span class="chip-title">视频生成</span>
             </label>
           </div>
         </fieldset>
 
         <div class="profile-dialog-tip">
-          <span class="tip-icon">💡</span>
+          <span class="tip-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg></span>
           <span>创建后按选定功能生成初始草稿，服务地址与密钥在渠道中配置。</span>
         </div>
       </div>
 
-      <div class="form-actions">
+      <div class="form-actions dialog-actions">
         <button class="button ghost" type="button" id="cancel-profile-bottom">取消</button>
-        <button class="button primary" type="submit">立即创建 Profile</button>
+        <button class="button primary" type="submit">创建 Profile</button>
       </div>
     </form>
   </dialog>

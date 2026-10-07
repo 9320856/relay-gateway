@@ -236,11 +236,6 @@ func ForwardStream(ctx context.Context, src io.Reader, dst http.ResponseWriter) 
 	return err
 }
 
-// CopyWithPool shares a bounded buffer and retains the source of copy errors.
-func CopyWithPool(dst io.Writer, src io.Reader) (int64, error) {
-	return httpforward.Copy(context.Background(), src, dst)
-}
-
 // ForwardHTTPRequest 统一的高性能 HTTP 代理转发管线，整合多 Key 容灾轮询、标头剥离与缓冲池无拷贝流式传输
 func (a *OpenAIAdapter) ForwardHTTPRequest(
 	ctx context.Context,

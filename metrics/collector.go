@@ -12,6 +12,9 @@ import (
 
 const defaultMaxLatencySamples = 10000
 
+// Default collects observations shared by HTTP handlers and background services.
+var Default = New()
+
 // Collector records runtime observations. It is safe for concurrent use.
 type Collector struct {
 	mu             sync.RWMutex

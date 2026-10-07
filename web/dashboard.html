@@ -6,37 +6,30 @@
   <meta name="google" content="notranslate">
   <meta name="description" content="Relay Gateway 管理控制台">
   <title>控制台 · Relay Gateway</title>
-  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
-  <script defer src="/assets/app.js?v=concurrency-v8"></script>
+  <link rel="stylesheet" href="/assets/app.css?v=ui-v0.2.4-r1">
+  <script defer src="/assets/app.js?v=ui-v0.2.4-r1"></script>
 </head>
 <body data-page="dashboard" translate="no" class="notranslate">
-  <div class="app-shell">
+  <div class="app-shell ui-shell">
     <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
-      <a class="brand" href="/dashboard">
-        <span class="brand-mark">RG</span>
-        <span class="brand-name">Relay Gateway</span>
-      </a>
+      <a class="brand" href="/dashboard"><span class="brand-mark">RG</span><span class="brand-name">Relay Gateway</span></a>
       <nav aria-label="主导航">
-        <a class="nav-link active" href="/dashboard" id="nav-dashboard">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
-          <span>控制台</span>
-        </a>
-        <a class="nav-link" href="/profiles" id="nav-profiles">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span>Profile 管理</span>
-        </a>
-        <a class="nav-link" href="/media" id="nav-media">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-          <span>媒体管理</span>
-        </a>
-        <a class="nav-link" href="/logs" id="nav-logs">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
-          <span>调用日志</span>
-        </a>
+        <div class="nav-group">
+          <p class="nav-group-label">工作空间</p>
+        <a class="nav-link active" href="/dashboard#overview" id="nav-dashboard" data-dashboard-view="overview"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>概览</span></a>
+        <a class="nav-link" href="/dashboard#channels" id="nav-channels" data-dashboard-view="channels"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M12 10v4"/></svg><span>渠道管理</span></a>
+        <a class="nav-link" href="/dashboard#playground" id="nav-playground" data-dashboard-view="playground"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span>模型调试</span></a>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">资源与观测</p>
+        <a class="nav-link" href="/profiles" id="nav-profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>Profile 协议</span></a>
+        <a class="nav-link" href="/media" id="nav-media"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg><span>媒体资产</span></a>
+        <a class="nav-link" href="/logs" id="nav-logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9l-6-6H8Z"/><path d="M14 3v6h6M7 13h10M7 17h7"/></svg><span>调用日志</span></a>
+        </div>
       </nav>
       <div class="sidebar-foot">
-        <span class="status-dot"></span>
-        <span>V0.2.3 · 开发测试版</span>
+        <a class="nav-link sidebar-settings" href="/dashboard#settings" id="nav-settings" data-dashboard-view="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 3-.6 2.4-2 .8-2.1-.9L2.3 9.6l1.8 1.6v1.6l-1.8 1.6 2.5 4.3 2.1-.9 2 .8.6 2.4h5l.6-2.4 2-.8 2.1.9 2.5-4.3-1.8-1.6v-1.6l1.8-1.6-2.5-4.3-2.1.9-2-.8-.6-2.4h-5Z"/><circle cx="12" cy="12" r="3"/></svg><span>系统设置</span></a>
+        <div class="sidebar-version"><span class="status-dot"></span><span>V0.2.4 · 开发测试版</span></div>
       </div>
     </aside>
 
@@ -49,14 +42,15 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
           <div class="topbar-title-wrap">
-            <h1>网关控制台</h1>
-            <p class="topbar-sub">路由、模型与运行状态</p>
+            <span class="workspace-breadcrumb" id="workspace-breadcrumb">工作空间</span>
+            <h1 id="workspace-title">概览</h1>
+            <p class="topbar-sub" id="workspace-description">集中管理渠道、协议与模型调用。</p>
           </div>
         </div>
         <div class="topbar-actions">
           <div class="topbar-status-badge" id="topbar-status">
             <span class="status-dot"></span>
-            <span>服务正常</span>
+            <span>正在检测</span>
           </div>
           <div class="user-menu">
             <button class="account-button" id="user-menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="user-menu-popover">
@@ -75,7 +69,11 @@
         </div>
       </header>
 
-      <!-- 统一运行概览数据带 (高 104px) -->
+      <section class="dashboard-panel overview-page" data-dashboard-panel="overview" aria-label="网关概览">
+        <div class="overview-welcome">
+          <div class="overview-intro"><p class="eyebrow">YOUR AI WORKSPACE</p><h2>从连接到调用，一处管理。</h2><p>配置上游渠道，按需绑定协议，然后验证你的第一个请求。</p></div>
+          <div class="overview-connection"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></svg><div><span>控制台连接</span><strong id="overview-connection-status" aria-live="polite">正在检测</strong></div></div>
+        </div>
       <section class="stats overview-strip" aria-label="运行概览">
         <article class="stat overview-cell">
           <span class="stat-label">总渠道</span>
@@ -107,27 +105,38 @@
         </article>
       </section>
 
-      <!-- 渠道管理矩阵 (全宽) -->
-      <section class="panel" id="channels-section">
+
+        <div class="overview-section-heading"><h3>开始使用</h3><p>按你的工作流程快速进入。</p></div>
+        <div class="overview-quick-actions">
+          <a class="quick-action-card" href="/dashboard#channels" data-dashboard-view="channels"><span class="quick-action-number">01</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M12 10v4"/></svg><h3>配置渠道</h3><p>连接上游服务，设置模型与路由策略。</p><span class="quick-action-link">管理渠道 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></span></a>
+          <a class="quick-action-card" href="/profiles"><span class="quick-action-number">02</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><h3>管理协议</h3><p>定义请求映射，发布可复用的协议版本。</p><span class="quick-action-link">查看 Profile <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></span></a>
+          <a class="quick-action-card" href="/dashboard#playground" data-dashboard-view="playground"><span class="quick-action-number">03</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><h3>测试请求</h3><p>发送对话、图片或视频请求，检查实际响应。</p><span class="quick-action-link">打开模型调试 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></span></a>
+        </div>
+        <div class="overview-api-card"><div><span class="eyebrow">API ENDPOINT</span><h3>统一 API 入口</h3><p>客户端使用网关 Key 访问，渠道密钥由网关管理。</p></div><div class="api-endpoint"><code id="overview-api-base">/v1</code><button class="button ghost compact-btn" id="copy-api-base" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg><span>复制地址</span></button></div><a class="text-link" href="/dashboard#settings" data-dashboard-view="settings">打开系统设置 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></a></div>
+      </section>
+
+      <!-- 渠道管理 -->
+      <section class="panel dashboard-panel hidden" id="channels-section" data-dashboard-panel="channels">
         <div class="panel-head">
           <div>
-            <h2>渠道管理</h2>
+            <h2>上游渠道</h2>
+            <p class="panel-subtitle">管理连接、模型与分发策略。</p>
           </div>
           <button class="button primary add-channel-btn" id="add-channel" type="button">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
             <span>添加渠道</span>
           </button>
         </div>
+        <div class="channel-toolbar">
+          <label class="search-control"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg><input id="channel-search" type="search" placeholder="搜索渠道名称、地址或模型" aria-label="搜索渠道"></label>
+          <label class="channel-status-control"><span>渠道状态</span><select id="channel-status-filter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option><option value="error">连接异常</option></select></label>
+          <span class="channel-filter-summary" id="channel-count" aria-live="polite">0 个渠道</span>
+        </div>
         <div class="table-wrap" id="channels-table-wrap">
           <table class="channels-table">
             <thead>
               <tr>
-                <th style="width: 28%;">渠道</th>
-                <th style="width: 12%;">类型</th>
-                <th style="width: 10%;">优先级</th>
-                <th style="width: 14%;">状态</th>
-                <th style="width: 10%;">模型</th>
-                <th style="width: 26%;" class="align-right">操作</th>
+                <th>渠道</th><th>协议</th><th>优先级</th><th>状态</th><th>模型</th><th>媒体保存</th><th class="align-right">操作</th>
               </tr>
             </thead>
             <tbody id="channel-list"></tbody>
@@ -144,26 +153,28 @@
             <span>添加第一个渠道</span>
           </button>
         </div>
+      <div class="empty hidden" id="channels-filter-empty"><div class="empty-icon-box"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></div><p class="empty-title">没有匹配的渠道</p><p class="empty-desc">尝试其他关键词或重置状态筛选。</p><button class="button" id="clear-channel-filters" type="button">清除筛选</button></div>
       </section>
 
-      <!-- 快速测试工作台 (42% / 58% 比例) -->
-      <section class="panel playground-panel">
+      <!-- 请求测试 -->
+      <section class="panel playground-panel dashboard-panel hidden" id="playground-section" data-dashboard-panel="playground">
         <div class="panel-head playground-head">
           <div>
-            <h2>快速测试工作台</h2>
+            <h2>模型调试</h2><p class="panel-subtitle">验证渠道与模型，查看每次调用的真实结果。</p>
           </div>
           <div class="tabs" role="tablist" aria-label="测试类型">
-            <button class="tab active" type="button" role="tab" aria-selected="true" data-playground-kind="chat">对话 (Chat)</button>
-            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="image">生图 (Image)</button>
-            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="video">视频 (Video)</button>
+            <button class="tab active" type="button" role="tab" aria-selected="true" data-playground-kind="chat">对话</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="image">图片</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-playground-kind="video">视频</button>
           </div>
         </div>
 
         <div class="playground-studio">
           <form id="playground-form" class="playground-form">
+            <div class="playground-form-head"><h3>请求参数</h3><span>配置并发送一次测试</span></div>
             <input type="hidden" name="kind" value="chat">
             <div class="form-grid">
-              <label>指定分发渠道
+              <label>路由渠道
                 <select name="channel_id">
                   <option value="">自动路由（权重分发）</option>
                 </select>
@@ -174,7 +185,7 @@
               </label>
             </div>
 
-            <label class="full">提示词 (Prompt)
+            <label class="full">提示词
               <textarea name="prompt" rows="5" required placeholder="输入对话测试内容"></textarea>
             </label>
 
@@ -189,7 +200,7 @@
                   <option value="768x1344">768x1344 (3:4 人像)</option>
                   <option value="1344x768">1344x768 (4:3 风景)</option>
                   <option value="512x512">512x512 (1:1 标清)</option>
-                  <option value="__custom__">➕ 自定义尺寸...</option>
+                  <option value="__custom__">自定义尺寸…</option>
                 </select>
                 <input name="image_size" id="playground-image-size-input" value="1024x1024" placeholder="输入自定义尺寸，例如 1152x896" class="hidden" style="margin-top:6px;">
               </label>
@@ -264,7 +275,7 @@
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
                 </div>
                 <p class="placeholder-title">等待测试请求</p>
-                <p class="placeholder-desc">在左侧配置参数并发送请求后，此处将展示解析后的渲染结果或原始报文。</p>
+                <p class="placeholder-desc">配置参数并发送请求后，在这里查看预览与原始 JSON。</p>
               </div>
 
               <div class="playground-preview-pane" id="playground-preview-pane">
@@ -283,17 +294,11 @@
   </div>
 
   <!-- 渠道配置模态框 -->
-  <dialog id="channel-dialog">
+  <dialog id="channel-dialog" class="channel-config-drawer" aria-labelledby="channel-dialog-title">
     <form id="channel-form" class="dialog-card">
-      <div class="panel-head">
-        <div>
-          <h2 id="channel-dialog-title">添加渠道</h2>
-        </div>
-        <button class="icon-button" type="button" id="cancel-channel" aria-label="关闭">×</button>
-      </div>
-
-      <div class="form-grid">
-        <label class="full hidden" id="channel-id-row">渠道 ID<input name="id" readonly maxlength="64"></label>
+      <div class="panel-head dialog-header"><div><p class="eyebrow">CHANNEL CONFIGURATION</p><h2 id="channel-dialog-title">添加渠道</h2><p class="panel-subtitle">连接上游服务并配置调用规则。</p></div><button class="icon-button" type="button" id="cancel-channel" aria-label="关闭">×</button></div>
+      <div class="dialog-body">
+        <section class="drawer-section "><div class="drawer-section-head"><h3>基本连接</h3><p>配置渠道名称、协议与上游鉴权。</p></div><div class="form-grid"><label class="full hidden" id="channel-id-row">渠道 ID<input name="id" readonly maxlength="64"></label>
         <label>显示名称<input name="name" required maxlength="128" placeholder="OpenAI 主线路"></label>
         <label id="channel-protocol-field">协议与运行档案
           <select id="channel-protocol-picker" required></select>
@@ -303,17 +308,8 @@
           <select name="profile_id"><option value="">不绑定自定义 Profile（使用内置协议默认）</option></select>
         </div>
         <label class="full">Base URL<input name="base_url" required placeholder="https://api.openai.com/v1"></label>
-        <label class="full">上游 Key（每行一个）<textarea name="api_keys_raw" rows="4" spellcheck="false" placeholder="sk-..."></textarea></label>
-        <label class="full">媒体保存
-          <select name="media_retention" aria-describedby="channel-media-retention-help">
-            <option value="disabled" selected>不保存</option>
-            <option value="best_effort">尽力保存</option>
-            <option value="required">必须保存</option>
-          </select>
-          <small id="channel-media-retention-help">统一用于此渠道的图片和视频。尽力保存和必须保存会自动下载到网关；尽力保存失败仍可返回上游结果，必须保存成功后才返回完成结果，失败时同步请求报错，异步任务保持待完成或失败。</small>
-        </label>
-
-        <section class="full model-editor" aria-labelledby="model-editor-title">
+        <label class="full">上游 Key（每行一个）<textarea name="api_keys_raw" rows="4" spellcheck="false" placeholder="sk-..."></textarea></label></div></section>
+        <section class="drawer-section drawer-models"><div class="drawer-section-head"><h3>模型与映射</h3><p>获取可用模型，选择启用范围并设置对外别名。</p></div><div class="form-grid"><section class="full model-editor" aria-labelledby="model-editor-title">
           <div class="model-editor-head">
             <div>
               <strong id="model-editor-title">上游模型</strong>
@@ -346,19 +342,22 @@
           <div class="mapping-head" aria-hidden="true"><span>对外模型名</span><span>上游模型</span><span></span></div>
           <div class="mapping-list" id="mapping-list"></div>
           <p class="empty-inline" id="mapping-empty">尚未添加映射。</p>
-        </section>
-
-        <label class="full">附加请求头（JSON 对象）<textarea name="headers_raw" rows="3" spellcheck="false" placeholder='{"X-Custom-Header":"value"}'></textarea></label>
+        </section></div></section>
+        <section class="drawer-section "><div class="drawer-section-head"><h3>媒体保存</h3><p>按业务需要保存图片与视频到网关。</p></div><div class="form-grid"><label class="full">媒体保存
+          <select name="media_retention" aria-describedby="channel-media-retention-help">
+            <option value="disabled" selected>不保存</option>
+            <option value="best_effort">尽力保存</option>
+            <option value="required">必须保存</option>
+          </select>
+          <small id="channel-media-retention-help">默认不保存。尽力保存失败仍返回上游结果；必须保存成功后才返回完成结果。适用于此渠道的图片与视频。</small>
+        </label></div></section>
+        <section class="drawer-section "><div class="drawer-section-head"><h3>分发与高级配置</h3><p>调整渠道权重、优先级和附加请求头。</p></div><div class="form-grid"><label class="full">附加请求头（JSON 对象）<textarea name="headers_raw" rows="3" spellcheck="false" placeholder='{"X-Custom-Header":"value"}'></textarea></label>
         <label>优先级<input name="priority" type="number" min="1" value="1"></label>
         <label>权重<input name="weight" type="number" min="1" max="100" value="1"></label>
         <label class="check full"><input name="enabled" type="checkbox" checked>启用渠道</label>
-        <label class="check full"><input name="fetch_models" type="checkbox" checked>自动同步模型</label>
+        <label class="check full"><input name="fetch_models" type="checkbox" checked>自动同步模型</label></div></section>
       </div>
-
-      <div class="form-actions" style="margin-top:20px;">
-        <button class="button ghost" type="button" id="cancel-channel-bottom">取消</button>
-        <button class="button primary" type="submit">保存渠道</button>
-      </div>
+      <div class="form-actions dialog-actions"><button class="button ghost" type="button" id="cancel-channel-bottom">取消</button><button class="button primary" type="submit">保存渠道</button></div>
     </form>
   </dialog>
 

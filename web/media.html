@@ -6,37 +6,30 @@
   <meta name="google" content="notranslate">
   <meta name="description" content="Relay Gateway 托管媒体资产">
   <title>媒体资产 · Relay Gateway</title>
-  <link rel="stylesheet" href="/assets/app.css?v=linear-v5">
-  <script defer src="/assets/app.js?v=concurrency-v8"></script>
+  <link rel="stylesheet" href="/assets/app.css?v=ui-v0.2.4-r1">
+  <script defer src="/assets/app.js?v=ui-v0.2.4-r1"></script>
 </head>
 <body data-page="media" translate="no" class="notranslate">
-  <div class="app-shell">
+  <div class="app-shell ui-shell">
     <aside class="sidebar" aria-label="侧边栏导航" id="app-sidebar">
-      <a class="brand" href="/dashboard">
-        <span class="brand-mark">RG</span>
-        <span><strong>Relay Gateway</strong><small>V0.2.3 · 开发测试版</small></span>
-      </a>
+      <a class="brand" href="/dashboard"><span class="brand-mark">RG</span><span class="brand-name">Relay Gateway</span></a>
       <nav aria-label="主导航">
-        <a class="nav-link" href="/dashboard">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
-          <span>控制台</span>
-        </a>
-        <a class="nav-link" href="/profiles">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span>Profile 管理</span>
-        </a>
-        <a class="nav-link active" href="/media">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-          <span>媒体管理</span>
-        </a>
-        <a class="nav-link" href="/logs">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></svg>
-          <span>调用日志</span>
-        </a>
+        <div class="nav-group">
+          <p class="nav-group-label">工作空间</p>
+        <a class="nav-link" href="/dashboard" id="nav-dashboard" data-dashboard-view="overview"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>概览</span></a>
+        <a class="nav-link" href="/dashboard#channels" id="nav-channels" data-dashboard-view="channels"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M12 10v4"/></svg><span>渠道管理</span></a>
+        <a class="nav-link" href="/dashboard#playground" id="nav-playground" data-dashboard-view="playground"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span>模型调试</span></a>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">资源与观测</p>
+        <a class="nav-link" href="/profiles" id="nav-profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>Profile 协议</span></a>
+        <a class="nav-link active" href="/media" id="nav-media"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg><span>媒体资产</span></a>
+        <a class="nav-link" href="/logs" id="nav-logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9l-6-6H8Z"/><path d="M14 3v6h6M7 13h10M7 17h7"/></svg><span>调用日志</span></a>
+        </div>
       </nav>
       <div class="sidebar-foot">
-        <span class="status-dot"></span>
-        <span>本地媒体存储</span>
+        <a class="nav-link sidebar-settings" href="/dashboard#settings" id="nav-settings" data-dashboard-view="settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 3-.6 2.4-2 .8-2.1-.9L2.3 9.6l1.8 1.6v1.6l-1.8 1.6 2.5 4.3 2.1-.9 2 .8.6 2.4h5l.6-2.4 2-.8 2.1.9 2.5-4.3-1.8-1.6v-1.6l1.8-1.6-2.5-4.3-2.1.9-2-.8-.6-2.4h-5Z"/><circle cx="12" cy="12" r="3"/></svg><span>系统设置</span></a>
+        <div class="sidebar-version"><span class="status-dot"></span><span>V0.2.4 · 开发测试版</span></div>
       </div>
     </aside>
 
@@ -48,9 +41,10 @@
           <button class="mobile-nav-toggle icon-button" id="mobile-nav-toggle" type="button" aria-label="切换侧边栏导航">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
-          <div>
-            <p class="eyebrow"><span class="status-dot"></span>MEDIA REPOSITORY</p>
-            <h1>媒体资产管理</h1>
+          <div class="topbar-title-wrap">
+            <span class="workspace-breadcrumb" id="workspace-breadcrumb">资源与观测</span>
+            <h1 id="workspace-title">媒体资产</h1>
+            <p class="topbar-sub" id="workspace-description">查看保存的媒体文件，管理预览、链接与下载。</p>
           </div>
         </div>
         <div class="account">
@@ -65,34 +59,33 @@
         </div>
       </header>
 
-      <section class="panel">
-        <div class="panel-head">
+      <section class="panel media-library-panel">
+        <div class="panel-head media-panel-head">
           <div>
-            <p class="eyebrow">ASSETS</p>
-            <h2>托管文件库</h2>
-            <p class="muted">图片和视频可在此实时预览、获取公网直链；删除会同步清理本地物理文件和审计记录。</p>
+            <h2>资产库</h2>
+            <p class="muted">预览已保存的图片、视频和音频，复制访问链接或下载文件。</p>
           </div>
           <div class="form-actions media-toolbar">
             <label>类型
               <select id="media-kind-filter">
                 <option value="">全部类型</option>
-                <option value="image">图片 (Image)</option>
-                <option value="video">视频 (Video)</option>
-                <option value="audio">音频 (Audio)</option>
+                <option value="image">图片</option>
+                <option value="video">视频</option>
+                <option value="audio">音频</option>
               </select>
             </label>
             <label>状态
               <select id="media-status-filter">
                 <option value="">全部状态</option>
-                <option value="available">可用 (Available)</option>
-                <option value="pending">排队中 (Pending)</option>
-                <option value="materializing">固化中 (Materializing)</option>
-                <option value="failed">失败 (Failed)</option>
+                <option value="available">可用</option>
+                <option value="pending">排队中</option>
+                <option value="materializing">保存中</option>
+                <option value="failed">失败</option>
               </select>
             </label>
             <div class="view-switch-group tabs">
-              <button class="button compact-btn tab active" id="media-view-grid" type="button" title="画廊视图">⊞ 画廊</button>
-              <button class="button compact-btn tab" id="media-view-table" type="button" title="表格视图">☰ 表格</button>
+              <button class="button compact-btn tab active" id="media-view-grid" type="button" title="画廊视图" aria-label="画廊视图"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>画廊</span></button>
+              <button class="button compact-btn tab" id="media-view-table" type="button" title="表格视图" aria-label="表格视图"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span>表格</span></button>
             </div>
             <button class="button primary compact-btn" id="media-refresh" type="button">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
@@ -120,7 +113,7 @@
           </table>
         </div>
 
-        <div class="empty hidden" id="media-empty">暂无媒体资产。</div>
+        <div class="empty hidden" id="media-empty"><div class="empty-icon-box"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div><p class="empty-title">暂无媒体资产</p><p class="empty-desc">渠道开启媒体保存后，已保存的文件会出现在这里。</p></div>
 
         <div class="media-pagination">
           <button class="button ghost" id="media-prev" type="button">上一页</button>
@@ -139,7 +132,7 @@
           <h2 id="media-preview-title">媒体预览</h2>
           <span id="media-preview-meta" class="muted font-mono" style="font-size:0.75rem;"></span>
         </div>
-        <button class="button ghost compact-btn" id="media-preview-close" type="button">关闭 ✕</button>
+        <button class="button ghost compact-btn" id="media-preview-close" type="button">关闭</button>
       </div>
 
       <div id="media-preview-content" class="media-preview-content"></div>
@@ -151,8 +144,8 @@
           <button class="button ghost compact-btn" id="media-preview-copy-btn" type="button">复制公开链接</button>
         </div>
         <div class="media-preview-actions">
-          <a class="button ghost compact-btn" id="media-preview-open-ext" target="_blank" rel="noopener noreferrer">在新标签打开 ↗</a>
-          <a class="button primary compact-btn" id="media-preview-download-btn" download>下载 💾</a>
+          <a class="button ghost compact-btn" id="media-preview-open-ext" target="_blank" rel="noopener noreferrer">在新标签打开</a>
+          <a class="button primary compact-btn" id="media-preview-download-btn" download><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/></svg><span>下载</span></a>
         </div>
       </div>
     </div>

@@ -24,6 +24,7 @@ import (
 
 	"relay-gateway/config"
 	"relay-gateway/media"
+	"relay-gateway/metrics"
 )
 
 // txContextKey carries a request-scoped transaction to persistence helpers.
@@ -321,10 +322,13 @@ func InitDB(dbPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	opened, err := gorm.Open(sqlite.Dialector{Conn: sqlPool}, &gorm.Config{Logger: logger.New(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
+	sqlLogger := logger.New(log.New(os.Stdout, "", log.LstdFlags), logger.Config{
 		LogLevel:                  logger.Warn,
 		IgnoreRecordNotFoundError: true,
-	})})
+	})
+	opened, err := gorm.Open(sqlite.Dialector{Conn: sqlPool}, &gorm.Config{
+		Logger: sqliteMetricsLogger{Interface: sqlLogger, collector: metrics.Default},
+	})
 	if err != nil {
 		_ = sqlPool.Close()
 		return err
@@ -1629,10 +1633,6 @@ func effectiveTaskMappingKind(taskKind string) string {
 	return taskKind
 }
 
-func getTaskMappingExact(taskID string) *TaskMapping {
-	return getTaskMappingExactContext(context.Background(), taskID)
-}
-
 func getTaskMappingExactContext(ctx context.Context, taskID string) *TaskMapping {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1650,10 +1650,6 @@ func getTaskMappingExactContext(ctx context.Context, taskID string) *TaskMapping
 
 func getCachedTaskMapping(taskID string) *TaskMapping {
 	return videoTaskCache.get(taskID, time.Now().UTC())
-}
-
-func loadTaskMapping(taskID string) *TaskMapping {
-	return loadTaskMappingContext(context.Background(), taskID)
 }
 
 func loadTaskMappingContext(ctx context.Context, taskID string) *TaskMapping {

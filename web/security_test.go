@@ -113,3 +113,14 @@ func TestAppRuntimeBehavior(t *testing.T) {
 		t.Fatalf("app runtime behavior test failed: %v\n%s", err, output)
 	}
 }
+
+func TestWorkspaceRuntimeBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	output, err := exec.Command(node, "ui_runtime_test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("workspace runtime behavior test failed: %v\n%s", err, output)
+	}
+}

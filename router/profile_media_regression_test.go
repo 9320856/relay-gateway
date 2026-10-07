@@ -243,8 +243,8 @@ func TestProfileMultiImageMaterializationRetriesOnlyMissingAssets(t *testing.T) 
 		})
 	}
 	c := mediaRegressionContext(http.MethodPost, "https://gateway.example", "/v1/images/jobs", "")
-	response := map[string]any{}
-	if err := materializeProfileImageResponse(c, run.ID, "", response, []string{inline, remote}); err == nil {
+	response := profileImageResponse(protocol.Result{JSON: map[string]any{"data": []map[string]string{{"url": inline}, {"url": remote}}}, ResultURLs: []string{inline, remote}}, false)
+	if err := retainMediaResponse(c, run.ID, "image", "", media.RetentionRequired, response, []string{inline, remote}); err == nil {
 		t.Fatal("expected second image materialization failure")
 	}
 	loaded, err := db.GetTaskRun(run.ID)
@@ -263,7 +263,7 @@ func TestProfileMultiImageMaterializationRetriesOnlyMissingAssets(t *testing.T) 
 	if err := db.RetryMediaAssetMaterialization(assets[1].ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := materializeProfileImageResponse(c, run.ID, "", response, []string{inline, remote}); err != nil {
+	if err := retainMediaResponse(c, run.ID, "image", "", media.RetentionRequired, response, []string{inline, remote}); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := db.GetTaskRun(run.ID)
@@ -277,6 +277,10 @@ func TestProfileMultiImageMaterializationRetriesOnlyMissingAssets(t *testing.T) 
 	firstJob, err := db.GetMediaMaterializationJob(assets[0].ID)
 	if err != nil || firstJob.Attempts != 1 || downloads != 2 {
 		t.Fatalf("retry downloaded available first image again: job=%+v downloads=%d err=%v", firstJob, downloads, err)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil || strings.Contains(string(encoded), inline) || strings.Contains(string(encoded), remote) || strings.Count(string(encoded), "/v1/media/") != 6 {
+		t.Fatalf("retained image batch did not rewrite data and raw payloads: %s, %v", encoded, err)
 	}
 }
 
@@ -314,7 +318,9 @@ func TestProfileMultiImageSynchronousAndBackgroundMaterializationShareAssets(t *
 	c := mediaRegressionContext(http.MethodPost, "https://gateway.example", "/v1/images/jobs", "")
 	c.Request = c.Request.WithContext(ctx)
 	go func() {
-		done <- materializeProfileImageResponse(c, run.ID, "", map[string]any{}, []string{"https://provider.example/first.png", "data:image/png;base64,iVBORw0KGgo="})
+		sources := []string{"https://provider.example/first.png", "data:image/png;base64,iVBORw0KGgo="}
+		response := profileImageResponse(protocol.Result{ResultURLs: sources}, false)
+		done <- retainMediaResponse(c, run.ID, "image", "", media.RetentionRequired, response, sources)
 	}()
 	select {
 	case <-entered:

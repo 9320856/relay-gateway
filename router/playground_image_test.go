@@ -181,7 +181,7 @@ func TestPlaygroundProfileImagePollShowsPersistedPreviewWhileMaterializing(t *te
 	}
 }
 
-func TestMaterializeProfileImageResponseAcceptsDataURL(t *testing.T) {
+func TestRetainProfileImageResponseAcceptsDataURL(t *testing.T) {
 	t.Setenv("RELAY_DB_ENCRYPTION_KEY", "profile-inline-image-test-key")
 	if err := db.InitDB(t.TempDir() + "/profile-inline-image.db"); err != nil {
 		t.Fatal(err)
@@ -200,11 +200,16 @@ func TestMaterializeProfileImageResponseAcceptsDataURL(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "http://gateway.test/v1/images/generations", nil)
 	dataURL := "data:image/png;base64,iVBORw0KGgo="
 	response := profileImageResponse(protocol.Result{JSON: map[string]any{"data": []any{map[string]any{"url": dataURL}}}, ResultURLs: []string{dataURL}}, false)
-	if err := materializeProfileImageResponse(c, "profile-inline-image-run", "", response, []string{dataURL}); err != nil {
+	if err := retainMediaResponse(c, "profile-inline-image-run", "image", "", media.RetentionRequired, response, []string{dataURL}); err != nil {
 		t.Fatal(err)
 	}
-	data, ok := response["data"].([]map[string]string)
-	if !ok || len(data) != 1 || !strings.Contains(data[0]["url"], "/v1/media/") {
+	data, ok := response["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("managed image response = %#v", response)
+	}
+	image, ok := data[0].(map[string]any)
+	managedURL, _ := image["url"].(string)
+	if !ok || !strings.Contains(managedURL, "/v1/media/") {
 		t.Fatalf("managed image response = %#v", response)
 	}
 	assets, err := db.ListMediaAssetsForTaskRunContext(context.Background(), "profile-inline-image-run", "image")

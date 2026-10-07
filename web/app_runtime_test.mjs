@@ -333,20 +333,22 @@ assert.equal(
   "historical absolute gateway media URLs should follow the current console origin",
 );
 assert.deepEqual(
-  JSON.parse(vm.runInContext(`JSON.stringify(managedLogMediaURLs([
+  JSON.parse(vm.runInContext(`JSON.stringify(managedLogMediaAssets([
     { id: 4, kind: "video", status: "available", ordinal: 1, public_url: "/v1/media/video-4/cap-4" },
     { id: 3, kind: "video", status: "available", ordinal: 0, publicUrl: "/v1/media/video-3/cap-3" },
+    { id: 5, kind: "VIDEO", status: "AVAILABLE", ordinal: 1 },
     { id: 2, kind: "video", status: "pending", ordinal: 2 },
-  ], "video"))`, context)),
-  ["/v1/media/video-3/cap-3", "/v1/media/video-4/cap-4"],
-  "available managed videos should expose only their public capability URLs",
+    { id: 1, kind: "image", status: "available", ordinal: 0 },
+    { id: 0, kind: "video", status: "available", ordinal: 0 },
+    null,
+  ], "video").map((asset) => asset.id))`, context)),
+  [3, 4, 5],
+  "managed previews should select available assets with IDs and order them by ordinal then ID, even without public links",
 );
 assert.deepEqual(
-  JSON.parse(vm.runInContext(`JSON.stringify(managedLogMediaURLs([
-    { id: 4, kind: "video", status: "available", ordinal: 1 },
-  ], "video"))`, context)),
+  JSON.parse(vm.runInContext(`JSON.stringify(managedLogMediaAssets(null, "video"))`, context)),
   [],
-  "managed content URLs must not be treated as public URLs when capability data is absent",
+  "absent managed assets should leave the legacy media fallback available",
 );
 const video = figure.querySelector("video");
 assert.ok(video, "video preview should be created");
@@ -464,6 +466,8 @@ assert.equal(timers.size, 0, "terminal tasks must stop refreshing");
 assert.equal(document.getElementById("visual-response-body").classList.contains("hidden"), true, "playable media should replace the duplicate structured response text");
 assert.equal(document.getElementById("copy-visual-response").classList.contains("hidden"), true, "hidden structured response text must not leave an orphan copy action");
 assert.equal(document.getElementById("visual-media-view").querySelectorAll("video").length, 1, "completed video logs should render one player inside the response");
+assert.equal(document.getElementById("visual-media-view").querySelector("video").getAttribute("src"), "/api/media-assets/9/content", "managed log video playback should use the admin content endpoint");
+assert.equal(document.getElementById("visual-media-view").querySelector("a").getAttribute("href"), "/v1/media/video-9/cap-9", "managed log public actions should keep the separate capability URL");
 vm.runInContext(`terminalVideoBeforeRefresh = byId("visual-media-view").querySelector("video")`, context);
 await vm.runInContext(`openLog("terminal")`, context);
 assert.equal(
@@ -484,13 +488,14 @@ const synchronousImageDetail = {
     response_body: JSON.stringify({ images: ["http://localhost:8000/v1/media/image/%5BREDACTED%5D"] }),
   },
   events: [],
-  media_assets: [{ id: 35, kind: "image", status: "available", ordinal: 0, public_url: "/v1/media/image/capability" }],
+  media_assets: [{ id: 35, kind: "image", status: "available", ordinal: 0 }],
 };
 fetchImpl = async () => response(200, synchronousImageDetail);
 await vm.runInContext(`openLog("sync-image")`, context);
 const synchronousLogImage = document.getElementById("visual-media-view").querySelector("img");
 assert.ok(synchronousLogImage, "synchronous image log should render its managed media asset");
 assert.equal(synchronousLogImage.getAttribute("src"), "/api/media-assets/35/content", "redacted audit URL must not be used for the image preview");
+assert.equal(document.getElementById("visual-media-view").querySelector("a"), null, "managed log previews without public links must not expose the admin content URL as a public action");
 
 fetchImpl = async () => response(200, logDetail("visible"));
 await vm.runInContext(`openLog("visible")`, context);
@@ -1087,5 +1092,55 @@ assert.equal(failedSetup.calls.length, 1, "unknown initialization status must no
 const initializedSetup = await setupHarness({ initialized: true, setup_secret_required: false });
 assert.deepEqual(initializedSetup.redirects, ["/login"]);
 assert.equal(initializedSetup.button.disabled, true);
+
+// Metadata may arrive after the channel list, or refresh while an editor is
+// already open. Exercise the real loaders against the browser-like selects.
+channelDocument.querySelector = (selector) => {
+  if (selector.includes("profile_id")) return channelForm.elements.profile_id;
+  if (selector.includes("name=type")) return channelForm.elements.type;
+  return null;
+};
+channelFetchImpl = async () => response(200, { data: [] });
+runChannel("openChannelDialog({id:'metadata-edit',type:'anthropic',base_url:'https://api.example/v1'})");
+await new Promise(resolve => setImmediate(resolve));
+channelFetchImpl = async () => response(200, { types: [
+  { type: "openai", name: "OpenAI" }, { type: "anthropic", name: "Anthropic" }
+] });
+await runChannel("loadAdapterTypes()");
+assert.equal(channelForm.elements.type.value, "anthropic", "late adapter metadata must preserve the submitted protocol");
+assert.equal(channelPicker.value, "builtin:anthropic", "the visible protocol and submitted type must agree");
+channelForm.elements.type.append(Object.assign(new FakeElement("option"), { value: "legacy-adapter" }));
+channelForm.elements.type.value = "legacy-adapter";
+await runChannel("loadAdapterTypes()");
+assert.equal(channelForm.elements.type.value, "legacy-adapter", "a historical adapter omitted from discovery must remain editable");
+
+channelForm.elements.profile_id.value = "custom-profile";
+channelForm.elements.profile_id.options.find(option => option.value === "custom-profile").dataset.revision = "2";
+channelPicker.value = "profile:custom-profile";
+channelFetchImpl = async (url) => response(200, url === "/api/profiles"
+  ? { data: [{ id: "custom-profile", name: "Custom", source: "custom", latest_revision: 5 }] }
+  : { revision: { state: "published", revision: 5 } });
+await runChannel("loadChannelProfiles()");
+assert.equal(channelForm.elements.profile_id.value, "custom-profile");
+assert.equal(channelForm.elements.profile_id.selectedOptions[0].dataset.revision, "2", "metadata refresh must not silently upgrade a selected revision");
+assert.equal(channelPicker.value, "profile:custom-profile");
+
+const metadataResponses = new Map();
+channelFetchImpl = (url) => new Promise(resolve => metadataResponses.set(url, resolve));
+const metadataLoad = runChannel("loadChannelEditorMetadata()");
+assert.equal(runChannel("openChannelDialog({id:'too-early',type:'anthropic'})"), false, "opening waits for both protocol sources");
+metadataResponses.get("/api/adapter-types")(response(200, { types: [{ type: "openai", name: "OpenAI" }] }));
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(runChannel("channelEditorMetadataLoading"), true);
+metadataResponses.get("/api/profiles")(response(200, { data: [] }));
+await metadataLoad;
+assert.equal(runChannel("channelEditorMetadataLoading"), false);
+assert.equal(runChannel("channelEditorMetadataError"), "");
+channelFetchImpl = async (url) => url === "/api/profiles"
+  ? response(503, { error: "Profiles temporarily unavailable" })
+  : response(200, { types: [{ type: "openai", name: "OpenAI" }] });
+await assert.rejects(runChannel("loadChannelEditorMetadata()"), /Profiles temporarily unavailable/);
+assert.equal(runChannel("channelEditorMetadataLoading"), false, "failed metadata loading releases the pending state");
+assert.match(runChannel("channelEditorMetadataError"), /Profiles temporarily unavailable/);
 
 console.log("app runtime behavior tests passed");

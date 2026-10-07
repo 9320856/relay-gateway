@@ -1,7 +1,6 @@
 "use strict";
 
 let csrfToken = "";
-let currentUser = null;
 
 const byId = (id) => document.getElementById(id);
 const formObject = (form) => Object.fromEntries(new FormData(form).entries());
@@ -50,7 +49,6 @@ async function request(path, options = {}) {
 async function loadIdentity() {
   const me = await request("/api/auth/me");
   csrfToken = me.csrf_token;
-  currentUser = me;
   const user = byId("current-user");
   if (user) user.textContent = me.username;
   const avatars = document.querySelectorAll(".account-avatar");
@@ -94,24 +92,6 @@ function setBusy(button, busy) {
       button.textContent = button.dataset.label;
     }
   }
-}
-
-function createEmptyState(message, hint = "") {
-  const box = document.createElement("div");
-  box.className = "empty-state";
-  const msg = document.createElement("p");
-  msg.style.margin = "0";
-  msg.style.fontWeight = "500";
-  msg.textContent = message;
-  box.append(msg);
-  if (hint) {
-    const sub = document.createElement("small");
-    sub.style.marginTop = "4px";
-    sub.style.color = "var(--color-text-muted)";
-    sub.textContent = hint;
-    box.append(sub);
-  }
-  return box;
 }
 
 async function logout() {
@@ -275,6 +255,9 @@ let channelSelectedModels = new Set();
 let channelSelectionInitialized = false;
 let channelDialogVersion = 0;
 let channelModelFetchVersion = 0;
+let channelEditorMetadataLoading = false;
+let channelEditorMetadataError = "";
+let channelEditorMetadataPromise = null;
 let playgroundPollToken = 0;
 
 function parseLines(value) {
@@ -361,17 +344,52 @@ function actionButton(label, action, channel, className = "") {
   return button;
 }
 
-function renderChannels() {
+function filteredChannels() {
+  const query = String(byId("channel-search")?.value || "").trim().toLowerCase();
+  const status = byId("channel-status-filter")?.value || "all";
+  return channels.filter((channel) => {
+    if (status === "enabled" && !channel.enabled) return false;
+    if (status === "disabled" && channel.enabled) return false;
+    if (status === "error" && (!channel.enabled || channel.last_status !== "error")) return false;
+    if (!query) return true;
+    return [channel.name, channel.id, channel.base_url, channel.type, ...channelModels(channel)]
+      .some((value) => String(value || "").toLowerCase().includes(query));
+  });
+}
+
+function bindChannelFilters() {
+  const renderFiltered = () => renderChannels({ refreshPlayground: false });
+  byId("channel-search")?.addEventListener("input", renderFiltered);
+  byId("channel-status-filter")?.addEventListener("change", renderFiltered);
+  byId("clear-channel-filters")?.addEventListener("click", () => {
+    if (byId("channel-search")) byId("channel-search").value = "";
+    const status = byId("channel-status-filter");
+    if (status) {
+      status.value = "all";
+      status.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      renderFiltered();
+    }
+    byId("channel-search")?.focus();
+  });
+}
+
+function renderChannels(options = {}) {
   const tbody = byId("channel-list");
   if (!tbody) return;
   tbody.replaceChildren();
   const hasChannels = channels.length !== 0;
+  const visibleChannels = filteredChannels();
+  const visibleIDs = new Set(visibleChannels.map((channel) => channel.id));
   byId("channels-empty")?.classList.toggle("hidden", hasChannels);
-  byId("channels-table-wrap")?.classList.toggle("hidden", !hasChannels);
+  byId("channels-table-wrap")?.classList.toggle("hidden", !hasChannels || visibleChannels.length === 0);
+  byId("channels-filter-empty")?.classList.toggle("hidden", !hasChannels || visibleChannels.length !== 0);
+  const count = byId("channel-count");
+  if (count) count.textContent = visibleChannels.length === channels.length ? `${channels.length} 个渠道` : `${visibleChannels.length} / ${channels.length} 个渠道`;
 
   let healthy = 0;
   const models = new Set();
-  const playgroundSelect = document.querySelector("#playground-form select[name=channel_id]");
+  const playgroundSelect = options.refreshPlayground === false ? null : document.querySelector("#playground-form select[name=channel_id]");
   const selectedChannel = playgroundSelect?.value || "";
   if (playgroundSelect) {
     const first = document.createElement("option");
@@ -383,6 +401,13 @@ function renderChannels() {
   channels.forEach((channel) => {
     if (channel.last_status === "healthy" && channel.enabled) healthy += 1;
     channelModels(channel).forEach((model) => models.add(model));
+    if (playgroundSelect && channel.enabled) {
+      const option = document.createElement("option");
+      option.value = channel.id;
+      option.textContent = channel.name || channel.id;
+      playgroundSelect.append(option);
+    }
+    if (!visibleIDs.has(channel.id)) return;
     const tr = document.createElement("tr");
 
     // 1. Channel Name and URL on next line (12px mono)
@@ -411,16 +436,24 @@ function renderChannels() {
     const statusTd = document.createElement("td");
     const badge = document.createElement("span");
     const isHealthy = channel.enabled && channel.last_status === "healthy";
-    const isError = channel.last_status === "error";
+    const isError = channel.enabled && channel.last_status === "error";
     badge.className = `badge status-badge ${isHealthy ? "success" : isError ? "error" : !channel.enabled ? "disabled" : "running"}`;
-    badge.textContent = channel.enabled ? (channel.last_status || "未测试") : "已停用";
+    badge.textContent = !channel.enabled ? "已停用" : isHealthy ? "运行正常" : isError ? "连接异常" : "待测试";
     statusTd.append(badge);
     tr.append(statusTd);
 
     // 5. Models count
     tr.append(cell(`${channelModels(channel, false).length} 个`));
 
-    // 6. Actions: Direct clear developer controls (测试, 编辑, 启用/停用, 删除)
+    // 6. One channel policy applies to both image and video retention.
+    const retentionTd = document.createElement("td");
+    const retention = document.createElement("span");
+    retention.className = "badge retention-badge";
+    retention.textContent = { disabled: "不保存", best_effort: "尽力保存", required: "必须保存" }[channel.media_retention || "disabled"] || "不保存";
+    retentionTd.append(retention);
+    tr.append(retentionTd);
+
+    // 7. Actions
     const actionsTd = document.createElement("td");
     actionsTd.className = "align-right";
 
@@ -436,13 +469,6 @@ function renderChannels() {
     actionsTd.append(actionsWrap);
     tr.append(actionsTd);
     tbody.append(tr);
-
-    if (playgroundSelect && channel.enabled) {
-      const option = document.createElement("option");
-      option.value = channel.id;
-      option.textContent = channel.name || channel.id;
-      playgroundSelect.append(option);
-    }
   });
 
   if (playgroundSelect && channels.some((channel) => channel.id === selectedChannel && channel.enabled)) {
@@ -458,7 +484,7 @@ function renderChannels() {
     healthyBar.style.width = `${pct}%`;
   }
 
-  updatePlaygroundModels();
+  if (options.refreshPlayground !== false) updatePlaygroundModels();
 }
 
 async function loadChannels() {
@@ -472,6 +498,7 @@ async function loadAdapterTypes() {
   adapterTypes = data.types || [];
   const select = document.querySelector("#channel-form select[name=type]");
   if (select) {
+    const selectedType = select.value;
     select.replaceChildren();
     adapterTypes.forEach((meta) => {
       const option = document.createElement("option");
@@ -479,6 +506,12 @@ async function loadAdapterTypes() {
       option.textContent = meta.name;
       select.append(option);
     });
+    if (selectedType) {
+      if (!Array.from(select.options).some((option) => option.value === selectedType)) {
+        appendOption(select, selectedType, `${selectedType}（当前渠道协议）`);
+      }
+      select.value = selectedType;
+    }
     select.addEventListener("change", () => {
       const meta = adapterTypes.find((item) => item.type === select.value);
       const url = document.querySelector("#channel-form input[name=base_url]");
@@ -486,6 +519,26 @@ async function loadAdapterTypes() {
     });
   }
   renderUnifiedProtocolPicker();
+}
+
+async function loadChannelEditorMetadata() {
+  if (channelEditorMetadataPromise) return channelEditorMetadataPromise;
+  channelEditorMetadataLoading = true;
+  channelEditorMetadataError = "";
+  channelEditorMetadataPromise = (async () => {
+    const results = await Promise.allSettled([loadAdapterTypes(), loadChannelProfiles()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) {
+      channelEditorMetadataError = failure.reason?.message || "协议资料加载失败";
+      throw failure.reason;
+    }
+  })();
+  try {
+    await channelEditorMetadataPromise;
+  } finally {
+    channelEditorMetadataLoading = false;
+    channelEditorMetadataPromise = null;
+  }
 }
 
 function renderUnifiedProtocolPicker() {
@@ -514,18 +567,29 @@ function renderUnifiedProtocolPicker() {
       builtinGroup.append(opt);
     }
   });
+  if (currentChannelType && !Array.from(builtinGroup.querySelectorAll("option")).some((option) => option.dataset.type === currentChannelType)) {
+    const option = appendOption(builtinGroup, `builtin:${currentChannelType}`, `${currentChannelType}（当前渠道协议）`);
+    option.dataset.type = currentChannelType;
+  }
   picker.append(builtinGroup);
 
   // 2. 已发布自定义 Profile 分组 (完整保留凡人生图等所有自定义 Profile)
-  if (channelProfiles && channelProfiles.length > 0) {
+  const selectedProfile = form?.elements?.profile_id;
+  const selectedProfileOption = Array.from(selectedProfile?.options || []).find((option) => option.value === selectedProfile.value);
+  const visibleProfiles = [...channelProfiles];
+  if (selectedProfile?.value && !visibleProfiles.some((profile) => profile.id === selectedProfile.value)) {
+    visibleProfiles.push({ id: selectedProfile.value, name: selectedProfile.value, revision: Number(selectedProfileOption?.dataset.revision || 0) });
+  }
+  if (visibleProfiles.length > 0) {
     const customGroup = document.createElement("optgroup");
     customGroup.label = "已发布自定义 Profile";
-    channelProfiles.forEach((profile) => {
+    visibleProfiles.forEach((profile) => {
+      const revision = profile.id === selectedProfile?.value ? Number(selectedProfileOption?.dataset.revision || profile.revision) : profile.revision;
       const opt = document.createElement("option");
       opt.value = `profile:${profile.id}`;
-      opt.textContent = `${profile.name} · Revision ${profile.revision}`;
+      opt.textContent = `${profile.name} · Revision ${revision}`;
       opt.dataset.profileId = profile.id;
-      opt.dataset.revision = String(profile.revision);
+      opt.dataset.revision = String(revision);
       customGroup.append(opt);
     });
     picker.append(customGroup);
@@ -615,20 +679,25 @@ async function loadChannelProfiles() {
     return null;
   }));
   channelProfiles = resolved.filter(Boolean).sort((left, right) => String(left.name).localeCompare(String(right.name), "zh-CN"));
-  renderChannelProfileOptions();
+  const select = document.querySelector("#channel-form select[name=profile_id]");
+  const selectedOption = Array.from(select?.options || []).find((option) => option.value === select.value);
+  renderChannelProfileOptions(select?.value || "", Number(selectedOption?.dataset.revision || 0), true);
   renderUnifiedProtocolPicker();
 }
 
-function renderChannelProfileOptions(selectedID = "", selectedRevision = 0) {
+function renderChannelProfileOptions(selectedID = "", selectedRevision = 0, preserveSelection = false) {
   const select = document.querySelector("#channel-form select[name=profile_id]");
   if (!select) return;
   select.replaceChildren();
   appendOption(select, "", channelProfiles.length ? "不绑定自定义 Profile（使用内置协议默认）" : "暂无已发布自定义 Profile", !selectedID);
   channelProfiles.forEach((profile) => {
-    const option = appendOption(select, profile.id, `${profile.name} · Revision ${profile.revision}`, profile.id === selectedID && Number(profile.revision) === Number(selectedRevision));
-    option.dataset.revision = String(profile.revision);
+    const revision = preserveSelection && profile.id === selectedID && selectedRevision ? selectedRevision : profile.revision;
+    const option = appendOption(select, profile.id, `${profile.name} · Revision ${revision}`, profile.id === selectedID && Number(revision) === Number(selectedRevision));
+    option.dataset.revision = String(revision);
   });
-  if (selectedID && !channelProfiles.some((profile) => profile.id === selectedID && Number(profile.revision) === Number(selectedRevision))) {
+  if (preserveSelection && selectedID && !channelProfiles.some((profile) => profile.id === selectedID)) {
+    appendOption(select, selectedID, `${selectedID} · Revision ${selectedRevision}（当前选择）`, true).dataset.revision = String(selectedRevision);
+  } else if (!preserveSelection && selectedID && !channelProfiles.some((profile) => profile.id === selectedID && Number(profile.revision) === Number(selectedRevision))) {
     select.value = "";
   }
 }
@@ -782,6 +851,15 @@ function serializeModelMappings() {
 }
 
 function openChannelDialog(channel = null) {
+  if (channelEditorMetadataLoading) {
+    toast("协议资料正在加载，请稍后再打开渠道编辑器");
+    return false;
+  }
+  if (channelEditorMetadataError) {
+    toast("协议资料加载失败，正在重试…");
+    void loadChannelEditorMetadata().then(() => openChannelDialog(channel)).catch((err) => toast(err.message, "error"));
+    return false;
+  }
   channelDialogVersion++;
   channelModelFetchVersion++;
   channelDiscoveredModels = [];
@@ -843,6 +921,7 @@ function openChannelDialog(channel = null) {
   form.scrollTop = 0;
   byId("channel-dialog").showModal();
   if (channel) void restoreChannelProfileSelection(channel.id);
+  return true;
 }
 
 function editChannel(channel) {
@@ -933,8 +1012,7 @@ async function deleteChannel(channel) {
 function bindChannelForm() {
   setupProtocolPicker();
   const openAdd = () => {
-    openChannelDialog();
-    void loadChannelProfiles().catch(() => {});
+    if (openChannelDialog()) void loadChannelProfiles().catch(() => {});
   };
   byId("add-channel")?.addEventListener("click", openAdd);
   byId("empty-add-channel")?.addEventListener("click", openAdd);
@@ -1023,10 +1101,14 @@ function bindChannelForm() {
 }
 
 async function loadSettings() {
-  const settings = await request("/api/settings");
   const form = byId("settings-form");
-  form.elements.port.value = settings.port;
-  form.elements.audit_retention_days.value = settings.audit_retention_days;
+  const names = ["port", "audit_retention_days"];
+  const initialValues = Object.fromEntries(names.map((name) => [name, form.elements[name].value]));
+  const settings = await request("/api/settings");
+  names.forEach((name) => {
+    const field = form.elements[name];
+    if (!field.dataset.settingsDirty && field.value === initialValues[name]) field.value = settings[name];
+  });
   const info = settings.gateway_token || {};
   const isConfigured = Boolean(info.configured);
   byId("token-prefix").textContent = isConfigured ? `${info.prefix}…` : "未配置";
@@ -2212,13 +2294,21 @@ function bindSettings() {
   });
   byId("close-settings").addEventListener("click", () => byId("settings-dialog").close());
   byId("settings-dialog").addEventListener("close", clearOneTimeToken);
+  ["port", "audit_retention_days"].forEach((name) => {
+    byId("settings-form").elements[name].addEventListener("input", (event) => { event.currentTarget.dataset.settingsDirty = "true"; });
+  });
   byId("settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = formObject(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formObject(form);
     try {
       await request("/api/settings", {
         method: "POST",
         body: { port: Number(data.port), audit_retention_days: Number(data.audit_retention_days) }
+      });
+      ["port", "audit_retention_days"].forEach((name) => {
+        const field = form.elements[name];
+        if (String(field.value) === String(data[name])) delete field.dataset.settingsDirty;
       });
       toast("设置已保存；端口修改将在重启后生效");
     } catch (err) {
@@ -2987,38 +3077,163 @@ function bindPlayground() {
   setPlaygroundKind("chat");
 }
 
+function updateSidebarNavigation(view = "overview") {
+  const page = document.body.dataset.page;
+  document.querySelectorAll(".nav-link").forEach((link) => {
+    const dashboardView = link.dataset.dashboardView;
+    const href = link.getAttribute("href") || "";
+    const active = dashboardView
+      ? page === "dashboard" && dashboardView === view
+      : href.split("#", 1)[0] === `/${page}`;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+}
+
+function initDashboardViews() {
+  const views = {
+    overview: { title: "工作台", description: "查看网关状态，快速接入并开始使用。", breadcrumb: "概览" },
+    channels: { title: "渠道管理", description: "管理上游连接、可用模型与路由策略。", breadcrumb: "渠道管理" },
+    playground: { title: "模型调试", description: "测试对话、图片与视频，查看网关的真实返回。", breadcrumb: "模型调试" }
+  };
+  let routeSettingsOpen = false;
+  let previousViewHash = "#overview";
+  const syncView = () => {
+    const requested = String(window.location?.hash || "").slice(1);
+    const view = Object.hasOwn(views, requested) ? requested : "overview";
+    if (requested !== "settings") {
+      previousViewHash = `#${view}`;
+      if (routeSettingsOpen) {
+        routeSettingsOpen = false;
+        byId("settings-dialog")?.close();
+      }
+    }
+    document.querySelectorAll("[data-dashboard-panel]").forEach((panel) => {
+      const active = panel.dataset.dashboardPanel === view;
+      panel.classList.toggle("hidden", !active);
+      panel.setAttribute("aria-hidden", String(!active));
+    });
+    const meta = views[view];
+    if (byId("workspace-title")) byId("workspace-title").textContent = meta.title;
+    if (byId("workspace-description")) byId("workspace-description").textContent = meta.description;
+    if (byId("workspace-breadcrumb")) byId("workspace-breadcrumb").textContent = meta.breadcrumb;
+    updateSidebarNavigation(view);
+    if (requested === "settings") {
+      routeSettingsOpen = true;
+      openSettings("runtime");
+    }
+  };
+  byId("settings-dialog")?.addEventListener("close", () => {
+    if (!routeSettingsOpen || window.location?.hash !== "#settings") return;
+    routeSettingsOpen = false;
+    if (window.history?.replaceState) {
+      window.history.replaceState(window.history.state, "", previousViewHash);
+      syncView();
+    } else {
+      window.location.hash = previousViewHash;
+    }
+  });
+  window.addEventListener("hashchange", syncView);
+  document.querySelectorAll('[data-dashboard-view="settings"]').forEach((link) => {
+    link.addEventListener("click", (event) => {
+      if (window.location?.hash === "#settings") {
+        event.preventDefault();
+        openSettings("runtime");
+      }
+    });
+  });
+  syncView();
+}
+
+async function loadOverviewConnection() {
+  const status = byId("overview-connection-status");
+  const topbar = byId("topbar-status");
+  if (!status && !topbar) return;
+  const display = (message, state) => {
+    if (status) {
+      status.textContent = message;
+      status.dataset.status = state;
+      status.classList.remove("success", "error", "running");
+      status.classList.add(state === "healthy" ? "success" : state === "checking" ? "running" : "error");
+    }
+    if (topbar) {
+      topbar.dataset.status = state;
+      const text = Array.from(topbar.querySelectorAll("span")).find((span) => !span.classList.contains("status-dot"));
+      if (text) text.textContent = { checking: "检测中", healthy: "网关正常", degraded: "状态异常", error: "连接异常" }[state];
+      const dot = topbar.querySelector(".status-dot");
+      if (dot) {
+        dot.classList.remove("idle", "warning", "error");
+        if (state !== "healthy") dot.classList.add(state === "checking" ? "idle" : state === "degraded" ? "warning" : "error");
+      }
+    }
+  };
+  display("正在检查网关…", "checking");
+  try {
+    const health = await request("/health");
+    display(health.status === "ok" ? "网关运行正常" : "网关状态异常", health.status === "ok" ? "healthy" : "degraded");
+  } catch (err) {
+    display("无法连接网关", "error");
+    throw err;
+  }
+}
+
+function bindOverview() {
+  const apiBase = `${window.location?.origin || location.origin}/v1`;
+  if (byId("overview-api-base")) byId("overview-api-base").textContent = apiBase;
+  byId("copy-api-base")?.addEventListener("click", () => copyTextWithFeedback(apiBase));
+}
+
 async function initDashboard() {
   const me = await loadIdentity();
+  channelEditorMetadataLoading = true;
   bindLogout();
   bindUserMenu();
-  await Promise.all([loadAdapterTypes(), loadChannelProfiles(), loadChannels(), loadSettings()]);
-  if (me.gateway_token?.configured) {
-    byId("stat-token").textContent = `${me.gateway_token.prefix}…`;
-    byId("stat-token-container")?.classList.add("configured");
-  }
   bindChannelForm();
+  bindChannelFilters();
   bindSettings();
   bindPlayground();
   enhanceAllSelects();
   bindMobileNav();
+  bindOverview();
+  initDashboardViews();
+  if (me.gateway_token?.configured) {
+    byId("stat-token").textContent = `${me.gateway_token.prefix}…`;
+    byId("stat-token-container")?.classList.add("configured");
+  }
 
   document.addEventListener("click", () => {
     document.querySelectorAll(".channel-menu-popover").forEach((m) => m.classList.add("hidden"));
   });
+  await Promise.all([loadChannelEditorMetadata, loadChannels, loadSettings, loadOverviewConnection]
+    .map((load) => load().catch((err) => toast(err.message, "error"))));
 }
 
 function bindMobileNav() {
   const mobileToggle = byId("mobile-nav-toggle");
   const sidebar = byId("app-sidebar");
   const backdrop = byId("sidebar-backdrop");
+  updateSidebarNavigation();
   if (mobileToggle && sidebar && backdrop) {
+    const close = () => {
+      sidebar.classList.remove("mobile-open");
+      backdrop.classList.remove("active");
+      mobileToggle.setAttribute("aria-expanded", "false");
+    };
+    mobileToggle.setAttribute("aria-controls", "app-sidebar");
+    mobileToggle.setAttribute("aria-expanded", "false");
     mobileToggle.addEventListener("click", () => {
       const open = sidebar.classList.toggle("mobile-open");
       backdrop.classList.toggle("active", open);
+      mobileToggle.setAttribute("aria-expanded", String(open));
     });
-    backdrop.addEventListener("click", () => {
-      sidebar.classList.remove("mobile-open");
-      backdrop.classList.remove("active");
+    backdrop.addEventListener("click", close);
+    sidebar.querySelectorAll("a").forEach((link) => link.addEventListener("click", close));
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && sidebar.classList.contains("mobile-open")) {
+        close();
+        mobileToggle.focus();
+      }
     });
   }
 }
@@ -3027,13 +3242,14 @@ async function initProfiles() {
   await loadIdentity();
   bindLogout();
   bindMobileNav();
-  await Promise.all([loadChannels(), loadProfiles()]);
+  await Promise.all([loadChannels, loadProfiles].map((load) => load().catch((err) => toast(err.message, "error"))));
   bindProfileManager();
   enhanceAllSelects();
 }
 
 let logPage = 1;
 let logTotal = 0;
+let logListRequestToken = 0;
 const logPageSize = 50;
 
 function outcomeLabel(value) {
@@ -3416,12 +3632,6 @@ function normalizeLogMediaURL(value) {
   }
 }
 
-function managedLogMediaURLs(assets, kind) {
-  return managedLogMediaAssets(assets, kind)
-    .map((asset) => normalizeMediaURL(asset.public_url || asset.publicUrl || asset.public_link || asset.publicLink, kind))
-    .filter(Boolean);
-}
-
 function managedLogMediaAssets(assets, kind) {
   if (!Array.isArray(assets)) return [];
   return assets
@@ -3604,8 +3814,16 @@ function asyncResultBody(row) {
   return row?.async_result_body || row?.response_body || "";
 }
 
+function logListDetailChanged(row, detail) {
+  // The list deliberately omits response bodies. Compare only authoritative
+  // list columns, including synchronous completion and async task projection.
+  const fields = ["outcome", "status_code", "finished_at", "duration_ms", "target_model", "channel_id", "channel_name", "channel_type", "input_tokens", "output_tokens", "retry_count", "async_task_kind", "async_task_id", "async_task_status", "async_poll_count", "async_last_polled_at", "async_completed_at", "error_message", "request_truncated", "response_truncated"];
+  return fields.some((field) => Object.hasOwn(row, field) && JSON.stringify(row[field] ?? null) !== JSON.stringify(detail[field] ?? null));
+}
+
 function renderLogs(rows) {
   const container = byId("log-list");
+  const selectedRow = rows.find((row) => row.id === activeLogID) || rows[0];
   container.replaceChildren();
   byId("logs-empty").classList.toggle("hidden", rows.length !== 0);
 
@@ -3614,6 +3832,7 @@ function renderLogs(rows) {
     item.className = "log-item-card";
     item.tabIndex = 0;
     item.dataset.logId = row.id;
+    item.classList.toggle("active-row", row.id === selectedRow?.id);
 
     item.addEventListener("click", () => {
       document.querySelectorAll("#log-list .log-item-card").forEach((r) => r.classList.remove("active-row"));
@@ -3737,7 +3956,7 @@ function renderLogs(rows) {
       }
     });
     if (r.channel_id && !allAvailableChannels.has(r.channel_id)) {
-      const name = r.channel_name ? `🏷️ ${r.channel_name}` : `🏷️ ${r.channel_id}`;
+      const name = r.channel_name || r.channel_id;
       allAvailableChannels.set(r.channel_id, name);
       hasNewChannel = true;
     }
@@ -3751,10 +3970,14 @@ function renderLogs(rows) {
   byId("prev-page").disabled = logPage <= 1;
   byId("next-page").disabled = logPage >= pages;
 
-  // Auto-select first row if available
-  if (rows.length > 0 && container.firstElementChild) {
-    container.firstElementChild.classList.add("active-row");
-    openLog(rows[0].id);
+  // Keep the selected detail and media mounted while it remains in the list.
+  if (selectedRow) {
+    if (selectedRow.id !== activeLogID || activeLogRecord?.id !== selectedRow.id) openLog(selectedRow.id);
+    else if (logListDetailChanged(selectedRow, activeLogRecord)) {
+      stopActiveLogRefresh();
+      const token = ++activeLogRequestToken;
+      openLog(selectedRow.id, { background: true, token });
+    }
   } else {
     activeLogID = "";
     activeLogRequestToken += 1;
@@ -3772,6 +3995,7 @@ function renderLogs(rows) {
 }
 
 async function loadLogs() {
+  const requestToken = ++logListRequestToken;
   const form = byId("log-filters");
   const data = form ? formObject(form) : {};
   const params = new URLSearchParams({ page: String(logPage), page_size: String(logPageSize) });
@@ -3825,7 +4049,14 @@ async function loadLogs() {
   if (data.model && data.model.trim()) params.set("model", data.model.trim());
   if (data.outcome && data.outcome.trim()) params.set("outcome", data.outcome.trim());
 
-  const result = await request(`/api/logs?${params}`);
+  let result;
+  try {
+    result = await request(`/api/logs?${params}`);
+  } catch (err) {
+    if (requestToken !== logListRequestToken) return;
+    throw err;
+  }
+  if (requestToken !== logListRequestToken) return;
   logTotal = result.total || 0;
   renderLogs(result.data || []);
 }
@@ -3876,7 +4107,7 @@ async function openLog(id, options = {}) {
     if (empty) empty.classList.add("hidden");
     if (content) content.classList.remove("hidden");
     const inspectorPane = byId("logs-inspector");
-    if (inspectorPane) inspectorPane.classList.add("mobile-active");
+    if (inspectorPane && !background) inspectorPane.classList.add("mobile-active");
 
     // Title / ID
     const titleEl = byId("detail-title");
@@ -4229,6 +4460,18 @@ let dateSelectCtrl = null;
 let channelSelectCtrl = null;
 let outcomeSelectCtrl = null;
 
+function closeSelectDropdowns(except = null) {
+  document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((dropdown) => {
+    if (dropdown !== except) dropdown.classList.add("hidden");
+  });
+  document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((field) => {
+    if (except && field.contains(except)) return;
+    field.classList.remove("open");
+    field.querySelector(".custom-select-trigger")?.setAttribute("aria-expanded", "false");
+    field.querySelector(".combobox-arrow")?.setAttribute("aria-expanded", "false");
+  });
+}
+
 function setupCustomSelect({ wrapperId, inputId, triggerId, labelId, dropdownId, onChange }) {
   const wrapper = byId(wrapperId);
   const input = byId(inputId);
@@ -4238,12 +4481,7 @@ function setupCustomSelect({ wrapperId, inputId, triggerId, labelId, dropdownId,
   if (!wrapper || !trigger || !dropdown) return null;
 
   function openDropdown() {
-    document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => {
-      if (d !== dropdown) d.classList.add("hidden");
-    });
-    document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((f) => {
-      if (f !== wrapper) f.classList.remove("open");
-    });
+    closeSelectDropdowns(dropdown);
 
     const rect = trigger.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
@@ -4275,6 +4513,7 @@ function setupCustomSelect({ wrapperId, inputId, triggerId, labelId, dropdownId,
     if (label) label.textContent = text;
     dropdown.querySelectorAll(".combobox-item").forEach((item) => {
       item.classList.toggle("highlighted", (item.dataset.value ?? "") === (val ?? ""));
+      item.setAttribute("aria-selected", String((item.dataset.value ?? "") === (val ?? "")));
     });
     closeDropdown();
     if (triggerChange && typeof onChange === "function") {
@@ -4327,6 +4566,8 @@ function setupCustomSelect({ wrapperId, inputId, triggerId, labelId, dropdownId,
   });
 
   dropdown.querySelectorAll(".combobox-item").forEach((item) => {
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String((item.dataset.value ?? "") === (input?.value ?? "")));
     item.addEventListener("click", () => {
       selectOption(item.dataset.value ?? "", item.textContent);
     });
@@ -4349,6 +4590,8 @@ function enhanceSelect(select) {
   trigger.className = "custom-select-trigger";
   trigger.setAttribute("aria-haspopup", "listbox");
   trigger.setAttribute("aria-expanded", "false");
+  const accessibleLabel = select.getAttribute("aria-label");
+  if (accessibleLabel) trigger.setAttribute("aria-label", accessibleLabel);
 
   const textSpan = document.createElement("span");
   textSpan.className = "custom-select-text";
@@ -4385,6 +4628,7 @@ function enhanceSelect(select) {
     textSpan.textContent = text || select.getAttribute("placeholder") || "请选择...";
     dropdown.querySelectorAll(".combobox-item").forEach((item) => {
       item.classList.toggle("highlighted", item.dataset.value === select.value);
+      item.setAttribute("aria-selected", String(item.dataset.value === select.value));
     });
   }
 
@@ -4399,6 +4643,8 @@ function enhanceSelect(select) {
     if (opt.value === select.value) item.classList.add("highlighted");
     item.dataset.value = opt.value;
     item.textContent = opt.textContent;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(opt.value === select.value));
 
     item.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -4436,12 +4682,7 @@ function enhanceSelect(select) {
 
   function openDropdown() {
     if (select.disabled || trigger.disabled) return;
-    document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => {
-      if (d !== dropdown) d.classList.add("hidden");
-    });
-    document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((f) => {
-      if (f !== wrapper) f.classList.remove("open");
-    });
+    closeSelectDropdowns(dropdown);
 
     const rect = trigger.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
@@ -4551,9 +4792,11 @@ function renderChannelSelectOptions() {
   const allItem = document.createElement("div");
   allItem.className = "combobox-item all-option" + (currentVal === "" ? " highlighted" : "");
   allItem.dataset.value = "";
-  allItem.textContent = "🏷️ 全部渠道";
+  allItem.textContent = "全部渠道";
+  allItem.setAttribute("role", "option");
+  allItem.setAttribute("aria-selected", String(currentVal === ""));
   allItem.addEventListener("click", () => {
-    channelSelectCtrl?.selectOption("", "🏷️ 全部渠道");
+    channelSelectCtrl?.selectOption("", "全部渠道");
   });
   dropdown.append(allItem);
 
@@ -4563,6 +4806,8 @@ function renderChannelSelectOptions() {
     item.className = "combobox-item" + (currentVal === id ? " highlighted" : "");
     item.dataset.value = id;
     item.textContent = name;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(currentVal === id));
     item.addEventListener("click", () => {
       channelSelectCtrl?.selectOption(id, name);
     });
@@ -4580,11 +4825,14 @@ function renderModelComboboxOptions(filterText = "") {
   // Option 1: All models / Clear
   const allOpt = document.createElement("div");
   allOpt.className = "combobox-item all-option";
-  allOpt.textContent = "🤖 全部模型 (清空筛选)";
+  allOpt.textContent = "全部模型（清空筛选）";
+  allOpt.setAttribute("role", "option");
+  allOpt.setAttribute("aria-selected", String(!input.value.trim()));
   allOpt.addEventListener("click", () => {
     input.value = "";
     dropdown.classList.add("hidden");
     byId("model-combobox")?.classList.remove("open");
+    byId("model-combobox-arrow")?.setAttribute("aria-expanded", "false");
     logPage = 1;
     loadLogs().catch((err) => toast(err.message));
   });
@@ -4604,6 +4852,8 @@ function renderModelComboboxOptions(filterText = "") {
       const item = document.createElement("div");
       item.className = "combobox-item";
       item.textContent = m;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", String(input.value.trim() === m));
       if (input.value && input.value.trim() === m) {
         item.classList.add("highlighted");
       }
@@ -4611,6 +4861,7 @@ function renderModelComboboxOptions(filterText = "") {
         input.value = m;
         dropdown.classList.add("hidden");
         byId("model-combobox")?.classList.remove("open");
+        byId("model-combobox-arrow")?.setAttribute("aria-expanded", "false");
         logPage = 1;
         loadLogs().catch((err) => toast(err.message));
       });
@@ -4625,7 +4876,7 @@ async function populateLogFilterOptions() {
     const channelList = (res && res.channels) || [];
 
     channelList.forEach((ch) => {
-      const name = ch.name ? `🏷️ ${ch.name}` : `🏷️ ${ch.id}`;
+      const name = ch.name || ch.id;
       allAvailableChannels.set(ch.id, name);
 
       const models = channelModels(ch);
@@ -4710,14 +4961,12 @@ async function initLogs() {
   const modelArrow = byId("model-combobox-arrow");
 
   function openModelDropdown() {
-    document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => {
-      if (d !== modelDropdown) d.classList.add("hidden");
-    });
-    document.querySelectorAll(".custom-select-field").forEach((f) => f.classList.remove("open"));
+    closeSelectDropdowns(modelDropdown);
 
     byId("model-combobox")?.classList.add("open");
     renderModelComboboxOptions("");
     modelDropdown.classList.remove("hidden");
+    modelArrow?.setAttribute("aria-expanded", "true");
     const highlighted = modelDropdown.querySelector(".combobox-item.highlighted");
     if (highlighted) {
       highlighted.scrollIntoView({ block: "nearest" });
@@ -4727,6 +4976,7 @@ async function initLogs() {
   function closeModelDropdown() {
     modelDropdown?.classList.add("hidden");
     byId("model-combobox")?.classList.remove("open");
+    modelArrow?.setAttribute("aria-expanded", "false");
   }
 
   if (modelInput && modelDropdown) {
@@ -4738,6 +4988,7 @@ async function initLogs() {
       byId("model-combobox")?.classList.add("open");
       renderModelComboboxOptions(modelInput.value);
       modelDropdown.classList.remove("hidden");
+      modelArrow?.setAttribute("aria-expanded", "true");
     });
 
     modelInput.addEventListener("keydown", (e) => {
@@ -4789,8 +5040,7 @@ async function initLogs() {
 
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".custom-select-field") && !e.target.closest(".model-combobox-field")) {
-        document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => d.classList.add("hidden"));
-        document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((f) => f.classList.remove("open"));
+        closeSelectDropdowns();
       }
     });
   }
@@ -4805,13 +5055,12 @@ async function initLogs() {
     const form = byId("log-filters");
     if (form) {
       form.reset();
-      dateSelectCtrl?.selectOption("all", "📅 全部日期", false);
-      channelSelectCtrl?.selectOption("", "🏷️ 全部渠道", false);
-      outcomeSelectCtrl?.selectOption("", "🚥 全部状态", false);
+      dateSelectCtrl?.selectOption("all", "全部日期", false);
+      channelSelectCtrl?.selectOption("", "全部渠道", false);
+      outcomeSelectCtrl?.selectOption("", "全部状态", false);
       if (modelInput) modelInput.value = "";
       byId("custom-date-row")?.classList.add("hidden");
-      document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => d.classList.add("hidden"));
-      document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((f) => f.classList.remove("open"));
+      closeSelectDropdowns();
       logPage = 1;
       loadLogs().catch((err) => toast(err.message));
     }
@@ -4820,13 +5069,13 @@ async function initLogs() {
   byId("prev-page").addEventListener("click", () => {
     if (logPage > 1) {
       logPage -= 1;
-      loadLogs();
+      loadLogs().catch((err) => toast(err.message, "error"));
     }
   });
   byId("next-page").addEventListener("click", () => {
     if (logPage * logPageSize < logTotal) {
       logPage += 1;
-      loadLogs();
+      loadLogs().catch((err) => toast(err.message, "error"));
     }
   });
   byId("close-detail")?.addEventListener("click", () => byId("log-dialog")?.close());
@@ -5466,8 +5715,7 @@ async function initMedia() {
 document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".custom-select-field") && !e.target.closest(".model-combobox-field")) {
-      document.querySelectorAll(".combobox-dropdown, .custom-select-dropdown").forEach((d) => d.classList.add("hidden"));
-      document.querySelectorAll(".custom-select-field, .model-combobox-field").forEach((f) => f.classList.remove("open"));
+      closeSelectDropdowns();
     }
   });
 

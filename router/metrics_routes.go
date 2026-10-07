@@ -9,7 +9,7 @@ import (
 
 // RuntimeMetrics is process-local telemetry used by the rollout gate. It
 // contains no request bodies, credentials, URLs, or other user payloads.
-var RuntimeMetrics = metrics.New()
+var RuntimeMetrics = metrics.Default
 
 func metricsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

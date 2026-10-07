@@ -45,8 +45,9 @@ func TestProfileSynchronousMediaDoesNotPublishClaimableJob(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "http://gateway.example/v1/images/generations", nil).WithContext(ctx)
 	go func() {
-		_, err := materializeProfileMediaURL(c, "sync-run", "image", 0, "https://provider.example/image.png", "https://provider.example")
-		done <- err
+		source := "https://provider.example/image.png"
+		response := map[string]any{"data": []map[string]string{{"url": source}}}
+		done <- retainMediaResponse(c, "sync-run", "image", "https://provider.example", media.RetentionRequired, response, []string{source})
 	}()
 	select {
 	case <-entered:
